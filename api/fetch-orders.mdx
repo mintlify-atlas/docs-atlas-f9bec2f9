@@ -1,7 +1,7 @@
 ---
-title: "fetchOrders: Recent Order History for a Symbol"
+title: "fetchOrders: Paginated Recent Order History for a Symbol"
 sidebarTitle: "fetchOrders"
-description: "fetchOrders returns recent filled, canceled, and open orders for a symbol as IOrderData[]. Results are cached for 10 minutes."
+description: "fetchOrders returns up to 25 filled, canceled, and open orders for a symbol as IOrderData[], pending orders first, cached for 10 minutes per symbol."
 ---
 
 `fetchOrders` returns a unified view of recent order activity for a symbol, combining historical trade data (filled and cancelled orders) with the current open order book. Each result is enriched with the full order status from `binance.orderStatus()`, giving accurate `status`, `executedQty`, and `origQty` fields even for partially-filled entries. The result list always places pending orders first so the current state of the book is immediately visible at the top.

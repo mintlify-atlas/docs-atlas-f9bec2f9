@@ -10,10 +10,14 @@ You should reach for `WalletPublicService` in all normal usage. `WalletPrivateSe
 
 ## Accessing the service
 
+`wallet-manager` is a private package and is not published to npm. When you start the REPL with `npm start`, a `wallet` global is injected into the session automatically. In scripts or other modules, import from the local build output:
+
 ```typescript
-import wallet from 'wallet-manager';
-// or from the REPL:
-// wallet.walletPublicService is available globally
+// In the REPL (available as a global — no import needed):
+const service = wallet.walletPublicService;
+
+// In a local script, import from the build output:
+import wallet from './build/index.mjs';
 const service = wallet.walletPublicService;
 ```
 
@@ -28,7 +32,7 @@ Every method call is routed through an internal `EventListener` instance that is
 Before delegating to `WalletPrivateService`, `WalletPublicService` validates caller-supplied arguments and throws descriptive `Error` instances:
 
 - `amountUSDT` must be a finite number (`typeof amountUSDT !== "number" || isNaN(amountUSDT)`) and must not be negative.
-- For `commitTrade`, all three price arguments are checked for finiteness, `takeProfitPrice` must be strictly above the current market price, `stopLossPrice` must be strictly below it, and `stopLossPrice` must be less than `takeProfitPrice`.
+- For `commitTrade`, both caller-supplied price arguments (`takeProfitPrice` and `stopLossPrice`) are checked for finiteness. After the current market price is fetched internally, `takeProfitPrice` must be strictly above it, `stopLossPrice` must be strictly below it, and `stopLossPrice` must be less than `takeProfitPrice`.
 
 ### Structured audit log on every commit
 
@@ -133,5 +137,8 @@ interface IDailyPnL {
   </Card>
   <Card title="fetchPnl" icon="chart-line" href="/api/fetch-pnl">
     Daily PnL estimate from trade history
+  </Card>
+  <Card title="commitReload" icon="rotate" href="/api/commit-reload">
+    Flush per-symbol cache without placing an order
   </Card>
 </CardGroup>

@@ -40,7 +40,7 @@ After construction, `getBinance()` calls `binance$.useServerTime()` to perform t
 | `WALLET_GC_TTL` | `30_000` ms (30 s) | GC interval — expired cache entries are swept on this cadence |
 | `ORDERS_TTL` | `600_000` ms (10 min) | TTL applied to each `fetchOrders(symbol, limit)` result |
 | `PNL_TTL` | `600_000` ms (10 min) | TTL applied to each `fetchPnl(symbol, limit)` result |
-| `AVERAGE_PRICE_TTL` | `300_000` ms (5 min) | Price TTL used internally by `fetchPrice` |
+| `AVERAGE_PRICE_TTL` | `300_000` ms (5 min) | Defined in the module; `fetchPrice` is not TTL-cached and does not use this constant |
 
 The GC timer is started lazily on the first use of the service via the `singleshot`-wrapped `init` method. It calls `.gc()` on the `fetchPnl` and `fetchOrders` TTL stores every `WALLET_GC_TTL` milliseconds to evict stale entries and free memory.
 

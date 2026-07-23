@@ -73,7 +73,8 @@
               "api/fetch-balance",
               "api/fetch-fiat",
               "api/fetch-orders",
-              "api/fetch-pnl"
+              "api/fetch-pnl",
+              "api/commit-reload"
             ]
           },
           {

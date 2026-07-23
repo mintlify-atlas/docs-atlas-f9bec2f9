@@ -57,7 +57,9 @@ fs.writeFileSync("out.json", JSON.stringify(result, null, 2))
 
 ## Audit Log
 
-Every `commit*` call routed through `walletPublicService` emits a structured `console.log` record immediately after the operation completes, regardless of whether it succeeded or failed. The record has a fixed shape:
+Every trading `commit*` call (`commitBuy`, `commitSell`, `commitTrade`, `commitCancel`) routed through `walletPublicService` emits a structured `console.log` record immediately after the operation completes, regardless of whether it succeeded or failed. `commitReload` does not emit a log entry — it only flushes caches.
+
+The record always contains at minimum:
 
 ```json
 {
@@ -70,7 +72,7 @@ Every `commit*` call routed through `walletPublicService` emits a structured `co
 }
 ```
 
-The `action` field is one of `"buy"`, `"sell"`, `"trade"`, or `"cancel"`. The `status` field is `"success"` when the call returned normally and `"failed"` when it threw. The `walletPrivateService.clear()` cache flush is always called in the `finally` block after every commit, so subsequent reads reflect the post-trade state.
+The `action` field is one of `"buy"`, `"sell"`, `"trade"`, or `"cancel"`. The `status` field is `"success"` when the call returned normally and `"failed"` when it threw. For `commitTrade`, the record includes two additional fields — `takeProfitPrice` and `stopLossPrice` — alongside the base fields above. The `walletPrivateService.clear()` cache flush is always called in the `finally` block after every trading commit, so subsequent reads reflect the post-trade state.
 
 ## Per-Symbol Queue
 

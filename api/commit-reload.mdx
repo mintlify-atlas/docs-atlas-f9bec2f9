@@ -1,0 +1,57 @@
+---
+title: "commitReload: Flush Per-Symbol Cache Without an Order"
+sidebarTitle: "commitReload"
+description: "commitReload clears the WalletPrivateService memoization cache for a symbol without placing any order, forcing the next fetch to hit the Binance API."
+---
+
+`commitReload` is a cache-busting utility that forces the next `fetchOrders` or `fetchPnl` call for a symbol to bypass the 10-minute TTL cache and fetch fresh data directly from Binance. It does not place any order, move any funds, or interact with the exchange in any way — it only clears the internal memoization state inside `WalletPrivateService`. Call it when you need an up-to-date view of orders or PnL without waiting for the cache to expire naturally and without triggering a real trade.
+
+## Signature
+
+```typescript
+commitReload(symbol: string): Promise<void>
+```
+
+## Parameters
+
+<ParamField path="symbol" type="string" required>
+  Binance trading pair symbol, e.g. `"SOLUSDT"`. The cache is keyed per symbol, so reloading one symbol does not affect the cached state for any other symbol.
+</ParamField>
+
+## Returns
+
+`Promise<void>` — resolves when the cache has been cleared. There is no meaningful return value.
+
+## When to use
+
+The `WalletPrivateService` caches the results of `fetchOrders` and `fetchPnl` for 10 minutes per `symbol-limit` key. This cache is automatically invalidated after every `commit*` call (`commitBuy`, `commitSell`, `commitTrade`, `commitCancel`) via `walletPrivateService.clear()`. `commitReload` provides the same manual invalidation without the side effect of placing an order.
+
+Typical use cases:
+
+- You want to check whether an order placed outside this service (e.g. directly on the Binance web UI) is reflected in `fetchOrders`.
+- You are inspecting PnL in a tight loop and need each call to reflect the latest data.
+- You need to reset state after an error condition without placing a trade.
+
+## Implementation
+
+Internally, `commitReload` routes through the per-symbol `EventListener` queue (the same queue used by every other method) and calls `walletPrivateService.clear()`. This means it is serialized with any in-flight operation on the same symbol — it will wait for a pending `commitBuy` or `fetchOrders` to finish before clearing.
+
+```typescript
+// Simplified implementation from WalletPublicService:
+public commitReload = async (symbol: string) => {
+  const runner = this.getRunner(symbol);
+  return await runner.execute(symbol, "commitReload");
+  // internally: this.walletPrivateService.clear()
+};
+```
+
+## Example
+
+```typescript
+// Force a fresh fetch after manual intervention on Binance:
+await wallet.walletPublicService.commitReload("SOLUSDT");
+
+// Now fetchOrders will hit the Binance API directly:
+const orders = await wallet.walletPublicService.fetchOrders("SOLUSDT");
+console.log(orders[0]);
+```

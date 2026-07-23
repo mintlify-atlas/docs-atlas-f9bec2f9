@@ -1,7 +1,7 @@
 ---
-title: "commitBuy: Guarded Limit Buy with Market Fallback"
+title: "commitBuy: Guarded Limit Buy with Market-Buy Fallback"
 sidebarTitle: "commitBuy"
-description: "commitBuy places a limit BUY at price × 1.001, polls every 10 s, and falls back to a market buy after timeout. Returns 0 if open orders exist or balance is insufficient."
+description: "commitBuy places a limit BUY at price × 1.001, polls for a fill every 10 s, and market-buys the remainder on timeout. Returns 0 if guards fail."
 ---
 
 `commitBuy` is the standard entry point for opening a long position on a Binance spot symbol. It first checks that the symbol has no resting orders and that free USDT covers the requested amount — returning `0` without touching the exchange if either guard fails. When the guards pass it places a LIMIT BUY slightly above the current average price, polls for a fill every 10 seconds for up to 100 seconds, and if the limit does not fill in that window it cancels the resting order and market-buys the unfilled remainder so the entry never stays open on the book indefinitely.

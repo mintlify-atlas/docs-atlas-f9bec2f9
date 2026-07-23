@@ -47,21 +47,23 @@ commitTrade(
 
 ## Validation rules
 
-`WalletPublicService` validates all price arguments before fetching the market price or touching the exchange. Any violation throws an `Error` with a descriptive message:
+`WalletPublicService` runs two rounds of validation before touching the exchange. The cross-price check happens first, then the market price is fetched, then the remaining guards run. Any violation throws an `Error` with a descriptive message:
 
-| Rule | Error message |
-|---|---|
-| `takeProfitPrice` is not a finite number | `"take-profit price must be a valid number"` |
-| `stopLossPrice` is not a finite number | `"stop-loss price must be a valid number"` |
-| `stopLossPrice >= averagePrice` | `"stop-loss price must be less than average price"` |
-| `takeProfitPrice <= averagePrice` | `"take-profit price must be greater than average price"` |
-| `stopLossPrice > takeProfitPrice` | `"stop-loss price is greater than take-profit price"` |
-| `stopLossPrice <= 0` | `"stop-loss price must be greater than zero"` |
-| `takeProfitPrice <= 0` | `"take-profit price must be greater than zero"` |
+| When | Rule | Error message |
+|---|---|---|
+| Before `fetchPrice` | `stopLossPrice > takeProfitPrice` | `"stop-loss price is greater than take-profit price"` |
+| After `fetchPrice` | `takeProfitPrice` is not a finite number | `"take-profit price must be a valid number"` |
+| After `fetchPrice` | `stopLossPrice` is not a finite number | `"stop-loss price must be a valid number"` |
+| After `fetchPrice` | `takeProfitPrice <= marketPrice` | `"take-profit price must be greater than average price"` |
+| After `fetchPrice` | `stopLossPrice >= marketPrice` | `"stop-loss price must be less than average price"` |
+| After `fetchPrice` | `stopLossPrice <= 0` | `"stop-loss price must be greater than zero"` |
+| After `fetchPrice` | `takeProfitPrice <= 0` | `"take-profit price must be greater than zero"` |
+
+`marketPrice` here is the live price fetched internally by `WalletPublicService` — it is not a parameter you supply.
 
 ## Execution flow
 
-1. `WalletPublicService` fetches the current average price, then validates all four price arguments against the rules above.
+1. `WalletPublicService` first checks that `stopLossPrice < takeProfitPrice`, then fetches the current market price internally, then validates both price arguments against `marketPrice` and other rules above.
 2. The call enters the per-symbol execution queue.
 3. `COMMIT_TRADE_FN` checks for open orders and free USDT balance; returns `0` if either guard fails.
 4. The pre-buy coin balance is snapshotted via `FETCH_BALANCE_FN`.

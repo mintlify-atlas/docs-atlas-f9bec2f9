@@ -1,7 +1,7 @@
 ---
-title: "fetchFiat: Total USDT Balance (Free and Locked)"
+title: "fetchFiat: Account-Wide USDT Balance (Free and Locked)"
 sidebarTitle: "fetchFiat"
-description: "fetchFiat returns the total USDT balance on the Binance account, including amounts locked in open orders."
+description: "fetchFiat returns the account-wide USDT balance (free + locked). Accepts a symbol for per-symbol queue routing but the result is always account-wide."
 ---
 
 `fetchFiat` returns the total USDT balance on the Binance account, summing both the free amount and any USDT currently locked in open buy orders. This gives a true picture of total capital in the account regardless of how much is tied up in pending orders. The value is account-wide — it is not scoped to any particular trading pair.

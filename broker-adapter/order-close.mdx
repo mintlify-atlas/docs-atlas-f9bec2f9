@@ -172,17 +172,21 @@ override async onOrderCloseCommit(payload: BrokerOrderClosePayload) {
   <Step title="Step 2 — Verify loop">
     ```typescript
     for (let i = 0; i !== CANCEL_ROUNDS; i++) {
-      await sleep(1_000);
-      const { length: hasOrders } = await binance.openOrders(symbol);
-      if (hasOrders) {
-        error = new Error("Order not canceled");
-      } else {
-        error = null;
-        break;
+      try {
+        await sleep(1_000);
+        const { length: hasOrders } = await binance.openOrders(symbol);
+        if (hasOrders) {
+          error = new Error("Order not canceled");
+        } else {
+          error = null;
+          break;
+        }
+      } catch (e) {
+        error = e;
       }
     }
     ```
-    A separate verification pass polls `openOrders` up to 10 times to confirm the book is truly empty before the sell is placed. This guards against edge cases where a cancel appears to succeed but the order lingers briefly in the exchange's state. If orders remain after all verification rounds, the function throws — the engine retries the entire close sequence on the next tick.
+    A separate verification pass polls `openOrders` up to 10 times to confirm the book is truly empty before the sell is placed. The entire loop body is wrapped in a `try/catch` so that a network error on the status check is captured into `error` rather than escaping — the loop keeps retrying. This guards against edge cases where a cancel appears to succeed but the order lingers briefly in the exchange's state. If orders remain after all verification rounds, the function throws — the engine retries the entire close sequence on the next tick.
   </Step>
 
   <Step title="Step 3 — Sell entire free balance">

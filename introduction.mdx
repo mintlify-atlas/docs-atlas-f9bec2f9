@@ -31,9 +31,9 @@ Wallet Manager is composed of two service layers sitting on top of `node-binance
 
 `WalletPublicService` is the layer you should use in the REPL and when building adapter flows. It adds three things on top of the raw layer:
 
-- **Argument validation** — numeric types and logical constraints (e.g. `takeProfit > currentPrice > stopLoss`) are checked before any exchange call is made.
+- **Argument validation** — numeric types and logical constraints (e.g. `takeProfitPrice > currentPrice > stopLossPrice`) are checked before any exchange call is made.
 - **Per-symbol execution queue** — every method call goes through a `queued()` wrapper (from `functools-kit`) keyed to the symbol. Concurrent calls on the same symbol are serialized automatically, so two simultaneous `commitBuy("SOLUSDT", …)` calls can never race each other to the exchange.
-- **Structured audit log** — after every `commit*` call completes (or throws), a `console.log` record is emitted:
+- **Structured audit log** — after every `commit*` call completes (or throws), a `console.log` record is emitted. For `commitBuy` and `commitSell`:
 
 ```json
 {
@@ -46,7 +46,37 @@ Wallet Manager is composed of two service layers sitting on top of `node-binance
 }
 ```
 
+For `commitTrade`, two additional fields are included:
+
+```json
+{
+  "symbol": "SOLUSDT",
+  "action": "trade",
+  "amountUSDT": 20,
+  "averagePrice": 77.56,
+  "takeProfitPrice": 85.0,
+  "stopLossPrice": 74.0,
+  "date": "2024-11-15T10:32:01.000Z",
+  "status": "success"
+}
+```
+
 The `action` field is one of `"buy"`, `"sell"`, `"trade"`, or `"cancel"`. `status` is `"success"` or `"failed"`.
+
+#### Public method signatures
+
+| Method | Signature | Description |
+|---|---|---|
+| `commitBuy` | `(symbol: string, amountUSDT: number) => Promise<number>` | Guarded limit buy. Returns average fill price, or `0` if skipped. |
+| `commitSell` | `(symbol: string, amountUSDT: number) => Promise<number>` | Limit sell for `amountUSDT` worth of coin. Returns average fill price. |
+| `commitTrade` | `(symbol: string, amountUSDT: number, takeProfitPrice: number, stopLossPrice: number) => Promise<void>` | Buy + OCO bracket in one call. Validates `takeProfitPrice > currentPrice > stopLossPrice`. |
+| `commitCancel` | `(symbol: string) => Promise<void>` | Cancel all orders on symbol, verify book is clean, then sell entire free coin balance to USDT. |
+| `commitReload` | `(symbol: string) => Promise<void>` | Clears the TTL cache on the private service for the symbol. Useful after manually modifying orders outside this toolkit. |
+| `fetchPrice` | `(symbol: string) => Promise<number>` | Current market price. |
+| `fetchFiat` | `(symbol: string) => Promise<number>` | Total account USDT balance (free + locked). |
+| `fetchBalance` | `(symbol: string) => Promise<{ quantity: number; usdt: number }>` | Coin holdings for the symbol's base asset. `quantity` includes amounts locked in open orders. |
+| `fetchOrders` | `(symbol: string, limit?: number) => Promise<IOrderData[]>` | Recent orders (FILLED / CANCELED / NEW). `limit` defaults to `25`. |
+| `fetchPnl` | `(symbol: string, limit?: number) => Promise<IDailyPnL[]>` | Daily PnL estimate reconstructed from trade history and 1h candles. `limit` defaults to `25`. |
 
 ### WalletPrivateService — raw layer
 
@@ -59,7 +89,9 @@ The private service applies TTL caching to the two most expensive read operation
 | `fetchOrders` | 10 minutes per `symbol+limit` key |
 | `fetchPnl` | 10 minutes per `symbol+limit` key |
 
-A background interval flushes stale entries every 30 seconds. `fetchPrice` is not cached at the private-service level; `WalletPublicService` fetches a fresh price before every commit call.
+A background interval flushes stale entries every 30 seconds. `fetchPrice` is not cached; a fresh price is fetched before every `commit*` call.
+
+On initialization, the private service also assigns the underlying `node-binance-api` client to `globalThis.binance$`, which makes it available in the REPL for low-level inspection.
 
 ### DI container
 

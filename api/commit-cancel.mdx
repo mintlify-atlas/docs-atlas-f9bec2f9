@@ -1,7 +1,7 @@
 ---
 title: "commitCancel: Flatten Symbol and Exit Entire Balance to USDT"
 sidebarTitle: "commitCancel"
-description: "commitCancel cancels all open orders on a symbol, verifies the book is clean, then sells the entire free coin balance to USDT."
+description: "commitCancel cancels all open orders for a symbol, verifies the book is empty, then sells the entire coin balance to USDT with a market-sell fallback."
 ---
 
 `commitCancel` is the definitive "flatten and exit to cash" operation. It is designed around a critical constraint of Binance spot: a resting order (take-profit, stop-loss, or a stale limit entry) locks the base coin or USDT it would need to fill. Attempting to sell over locked funds either fails with an insufficient balance error or silently trades only the unlocked remainder. The correct sequence is always: cancel every pending order, verify the book is empty, and only then sell the full coin balance. `commitCancel` enforces this sequence unconditionally.

@@ -89,9 +89,9 @@ Wallet Manager ships with an interactive REPL that evaluates raw JavaScript agai
     | Command | What it returns |
     |---|---|
     | `fetchPrice("SOLUSDT")` | Current market price as a number |
-    | `fetchFiat("SOLUSDT")` | Your free USDT balance |
-    | `fetchBalance("SOLUSDT")` | `{ quantity, usdt }` — coin holdings and USDT value |
-    | `fetchOrders("SOLUSDT", N)` | Last N orders (FILLED / CANCELED / NEW) with side, price, and timestamps |
+    | `fetchFiat("SOLUSDT")` | Total account USDT balance (free + locked) |
+    | `fetchBalance("SOLUSDT")` | `{ quantity, usdt }` — coin holdings (including amounts locked in open orders) and their USDT value |
+    | `fetchOrders("SOLUSDT", N)` | Last N orders (FILLED / CANCELED / NEW) with side, price, quantities, and timestamps |
 
     <Note>
       If the REPL prints a credentials error on the first `await`, double-check

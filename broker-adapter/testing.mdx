@@ -83,13 +83,13 @@ npx @backtest-kit/cli --brokerdebug --commit signal-close --symbol SOLUSDT
 
 Before wiring the adapter to the full engine, individual order-management flows can also be exercised directly from the Wallet Manager REPL. Start the REPL with `npm start`, then:
 
-```
+```bash
 repl => await wallet.walletPublicService.commitBuy("SOLUSDT", 20)
 ```
 
 Places a limit BUY for 20 USDT of SOLUSDT, polls for a fill, and falls back to a market buy on timeout. This exercises the same post-poll-cancel-fallback flow that `onOrderOpenCommit` is built from.
 
-```
+```bash
 repl => await wallet.walletPublicService.commitCancel("SOLUSDT")
 ```
 
@@ -98,7 +98,7 @@ Cancels all open orders on SOLUSDT, verifies the book is empty, and sells the en
 <Tip>
   Use the REPL's `fetchOrders` and `fetchBalance` commands before and after each test to confirm the exchange state matches what you expect:
 
-  ```
+  ```bash
   repl => await wallet.walletPublicService.fetchOrders("SOLUSDT", 10)
   repl => await wallet.walletPublicService.fetchBalance("SOLUSDT")
   ```

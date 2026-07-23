@@ -4,7 +4,7 @@ sidebarTitle: "Mutating Commands"
 description: "Execute guarded buy, sell, trade-with-brackets, and full-flatten commands from the REPL. Every call places real orders on Binance spot."
 ---
 
-The mutating commands give you full order-management capability from the REPL: enter a position, exit a partial slice, set up OCO bracket protection, or flatten an entire symbol to cash in one call. All operations run through `walletPublicService`, which serializes them per symbol, validates inputs, and emits an audit log record after every call.
+The mutating commands give you full order-management capability from the REPL: enter a position, exit a partial slice, set up OCO bracket protection, or flatten an entire symbol to cash in one call. All trading operations (`commitBuy`, `commitSell`, `commitTrade`, `commitCancel`) run through `walletPublicService`, which serializes them per symbol, validates inputs, and emits an audit log record after each call. `commitReload` flushes read caches only and does not emit a log entry.
 
 <Warning>
 **These commands place real orders on Binance spot using live API keys. There is no dry-run mode.** Every `commit*` call below will interact with your actual account balance. Double-check the symbol and amount before pressing Enter.
@@ -41,7 +41,7 @@ A return value of `0` means the position was not opened. Check open orders with 
 
 ## `commitSell(symbol, amountUSDT)`
 
-Sells `amountUSDT` worth of the coin corresponding to `symbol`. Converts the USDT notional to a coin quantity at the current average price, then places a **LIMIT SELL** at `avgPrice × 0.999` (slightly below mid). The same poll loop as `commitBuy` runs: check every 10 seconds up to 10 times, and on timeout the order is **cancelled** and the unfilled remainder is **market-sold**.
+Sells `amountUSDT` worth of the coin corresponding to `symbol`. Converts the USDT notional to a coin quantity at the current average price, then places a **LIMIT SELL** at the current average price. The same poll loop as `commitBuy` runs: check every 10 seconds up to 10 times, and on timeout the order is **cancelled** and the unfilled remainder is **market-sold**.
 
 Unlike `commitBuy`, `commitSell` does not check for open orders or minimum balance before proceeding — it will attempt the sell immediately.
 

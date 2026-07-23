@@ -1,7 +1,7 @@
 ---
 title: "Poll-with-Timeout and Market Fallback for Limit Orders"
 sidebarTitle: "Poll & Fallback"
-description: "How commitBuy and commitSell poll limit orders every 10 seconds and fall back to a market order after timeout, ensuring the order never stays resting on the book."
+description: "How commitBuy and commitSell poll a limit order every 10 s for up to 100 s, then cancel and market-order the remainder on timeout."
 ---
 
 A limit order that misses the market should never be left alive on the exchange. Resting orders are invisible to the engine: if a forgotten limit fills hours later at a price the engine no longer controls, it creates a real position that no engine state tracks. Wallet Manager prevents this by coupling every limit order to a bounded poll loop and a mandatory fallback: after a fixed waiting window, the limit is cancelled and any unfilled remainder is immediately market-ordered. The entry or exit is guaranteed to complete — one way or another — within the polling window.
@@ -61,9 +61,9 @@ Neither `commitBuy` nor `commitSell` posts a limit order exactly at the current 
 | Function | Limit price | Direction | Rationale |
 |---|---|---|---|
 | `commitBuy` | `averagePrice × 1.001` | Slightly **above** market | A buy above the current ask is likely to match immediately |
-| `commitSell` | `averagePrice × 0.999` | Slightly **below** market | A sell below the current bid is likely to match immediately |
+| `commitSell` | `averagePrice` (no offset) | At market | The order is submitted at the raw `averagePrice`; `orderPrice` (`averagePrice × 0.999`) is computed but used only as the `getAveragePrice` fallback, not as the submitted limit price |
 
-The 0.1 % offset is narrow enough that the price impact is negligible on liquid spot pairs, but wide enough to win the queue position and avoid sitting behind resting orders at exactly the mid-price.
+`commitBuy`'s 0.1 % premium is narrow enough that price impact is negligible on liquid spot pairs, but wide enough to win queue position over resting orders at exactly the mid-price. `commitCancel`'s exit sell — a separate code path in `commit_cancel.function.ts` — does apply the `× 0.999` offset and posts slightly below market to favour a fast fill.
 
 ## Partial Fills
 
@@ -91,7 +91,7 @@ This means the return value of `commitBuy` or `commitSell` is the average price 
 The poll-with-timeout + market fallback is used in three places:
 
 - **`commitBuy`** — entry limit buy, market-buy fallback on timeout
-- **`commitSell`** — partial exit limit sell, market-sell fallback on timeout
+- **`commitSell`** — sized exit limit sell (for a specified `amountUSDT`), market-sell fallback on timeout
 - **`commitCancel` (sell leg)** — after the cancel-verify phase, the exit sell uses the same loop and falls back to `binance.marketSell` on timeout
 
 In the broker adapter example (`onOrderOpenCommit`), a structurally identical loop is also used directly, with the added dimension of Rule 1: any timeout on open causes the partial fill to be rolled back with a market sell before the transient throw.

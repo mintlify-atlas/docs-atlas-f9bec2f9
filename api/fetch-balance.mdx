@@ -1,7 +1,7 @@
 ---
 title: "fetchBalance: Coin Balance Including Locked Amounts"
 sidebarTitle: "fetchBalance"
-description: "fetchBalance returns the quantity and USDT value of the coin for a given symbol, including amounts locked in open orders."
+description: "fetchBalance returns the coin quantity and current USDT value for a symbol, combining free and locked balances. Supports 13 hardcoded trading pairs."
 ---
 
 `fetchBalance` returns the current coin balance for the asset associated with a trading pair symbol. The balance includes both the free (tradeable) portion and any quantity currently locked in open orders (`onOrder`), giving a complete picture of how much of the coin the account holds regardless of pending activity. The returned USDT value is computed at the current spot price.

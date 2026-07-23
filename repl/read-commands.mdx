@@ -4,7 +4,7 @@ sidebarTitle: "Read Commands"
 description: "Fetch live price, USDT balance, coin balances, order history, and daily PnL estimates from the REPL without placing any orders."
 ---
 
-All read-only commands are non-destructive — they fetch data from Binance and return it without placing, modifying, or canceling any orders. They are the right starting point before any manual trade: confirm the current price, verify your free USDT, and inspect open or recent orders before committing. Some results are cached; see the note at the bottom of this page for cache TTLs and how to bust them.
+All read-only commands are non-destructive — they fetch data from Binance and return it without placing, modifying, or canceling any orders. They are the right starting point before any manual trade: confirm the current price, verify your free USDT, and inspect open or recent orders before committing. `fetchOrders` and `fetchPnl` are cached; see the note at the bottom of this page for cache TTLs and how to bust them.
 
 ---
 
@@ -12,7 +12,7 @@ All read-only commands are non-destructive — they fetch data from Binance and 
 
 Returns the current average price for a symbol as a `number`, rounded to the exchange's tick size. Internally calls `binance.avgPrice()` and formats the result through the `PRICE_FILTER` tick size for the symbol, so the returned number is always a valid limit-order price on that pair.
 
-**Caching:** Results are cached for **30 seconds** per symbol via a `ttl()` wrapper on the underlying price ticker.
+**Caching:** `fetchPrice` is not cached — every call hits `binance.avgPrice()` live. The `PRICE_UPDATE_MS` constant in the price module applies only to an internal ticker helper that is not used by this code path.
 
 **Parameters:**
 
@@ -31,7 +31,7 @@ repl => await wallet.walletPublicService.fetchPrice("SOLUSDT")
 
 ## `fetchFiat(symbol)`
 
-Returns the total USDT balance for the account — free plus locked — as a `number`. The `symbol` argument is accepted for API consistency with the per-symbol queue, but the USDT balance is account-wide; passing any symbol returns the same value.
+Returns the total USDT balance for the account — free plus locked — as a `number`. The `symbol` argument is used only for queue routing: it selects which per-symbol serialization queue the call runs through. The USDT balance itself is account-wide; passing any valid symbol returns the same value.
 
 **Parameters:**
 
@@ -187,5 +187,5 @@ repl => fs.writeFileSync("pnl.json", JSON.stringify(await wallet.walletPublicSer
 ---
 
 <Note>
-**Cache TTLs.** `fetchOrders` and `fetchPnl` are cached for 10 minutes per `symbol + limit` key. `fetchPrice` uses a 30-second cache on the underlying ticker. After a `commit*` operation, `walletPublicService` automatically calls `walletPrivateService.clear()` to flush the orders and PnL caches, so the next read reflects the post-trade state. To flush the cache manually without placing a trade, call `commitReload(symbol)` — or call `wallet.walletPrivateService.clear()` directly to flush all symbols at once.
+**Cache TTLs.** `fetchOrders` and `fetchPnl` are cached for 10 minutes per `symbol + limit` key. `fetchPrice`, `fetchBalance`, and `fetchFiat` are not cached — every call hits Binance live. After a `commit*` operation, `walletPublicService` automatically calls `walletPrivateService.clear()` to flush the orders and PnL caches, so the next read reflects the post-trade state. To flush the cache manually without placing a trade, call `commitReload(symbol)` — or call `wallet.walletPrivateService.clear()` directly to flush all symbols at once.
 </Note>

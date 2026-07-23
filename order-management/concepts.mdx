@@ -1,7 +1,7 @@
 ---
 title: "Order Management Concepts: Three Rules for Safe Spot Trading"
 sidebarTitle: "Concepts"
-description: "Wallet Manager encodes three order-management patterns — cancel-verify-sell, poll-timeout-fallback, and clientOrderId reconcile — that prevent frozen balances and duplicate fills."
+description: "How Wallet Manager prevents frozen balances, stale resting orders, and duplicate fills using three complementary order-management patterns."
 ---
 
 Building a reliable broker adapter for a spot exchange is harder than it looks. The exchange is a stateful system: every unfilled order leaves real funds locked on the book, and a retry after a network failure may arrive after the previous attempt already touched the exchange. Get either of those wrong and you end up with frozen balances that block new orders, duplicate fills that open a second position the engine never asked for, or resting TP/SL brackets that keep holding the base coin long after the trade is meant to be closed. Wallet Manager codifies three concrete patterns that eliminate each failure mode.
