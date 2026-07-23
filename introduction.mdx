@@ -1,0 +1,101 @@
+---
+title: "Wallet Manager: Binance Spot Toolkit for backtest-kit"
+sidebarTitle: "Introduction"
+description: "Wallet Manager is a DI-wired Binance spot service layer and interactive REPL that encodes the correct order-management sequence for building broker adapters."
+---
+
+Wallet Manager is a focused internal toolkit built around Binance spot trading. It has two jobs: let you drive the exchange by hand — inspect balances, place and cancel orders, read PnL — without touching a trading engine; and serve as the reference implementation for the exchange side of a [backtest-kit](https://github.com/backtest-kit) broker adapter. Every `commit*` function in the source encodes the exact order-management flows (post → poll → cancel → market fallback) that a production adapter must get right to avoid leaving ghost orders on the book.
+
+<Warning>
+  **Live keys, real money.** Every `commit*` call places real orders on Binance
+  spot. There is no dry-run mode.
+</Warning>
+
+## The Frozen-Balance Problem
+
+The most common broker-adapter mistake on Binance spot is trying to sell an asset while its funds are still frozen in a pending order. On spot, every resting order locks its quantity — the base coin for a SELL order, USDT for a BUY order. If you attempt to sell on top of that lock, the order will either fail outright with an insufficient-balance error or silently fill only the unlocked remainder while the original TP, SL, or stale entry orders continue holding the rest. The position ends up partially closed with live orders still accumulating risk.
+
+The correct sequence is always:
+
+1. **Cancel** all pending orders on the symbol.
+2. **Verify** the book is clean — zero open orders remain.
+3. **Sell** the entire free coin balance to cash with a fresh order.
+
+This is exactly why `commitCancel` (and the `onOrderCloseCommit` broker-adapter example) cancels everything on the symbol and verifies zero open orders before executing the exit sell. Skipping either of the first two steps — or reversing their order — reliably produces partially-closed, underfunded positions that the engine has no way to detect.
+
+## Architecture
+
+Wallet Manager is composed of two service layers sitting on top of `node-binance-api`, wired together through a lightweight DI container built with `di-kit`.
+
+### WalletPublicService — recommended interface
+
+`WalletPublicService` is the layer you should use in the REPL and when building adapter flows. It adds three things on top of the raw layer:
+
+- **Argument validation** — numeric types and logical constraints (e.g. `takeProfit > currentPrice > stopLoss`) are checked before any exchange call is made.
+- **Per-symbol execution queue** — every method call goes through a `queued()` wrapper (from `functools-kit`) keyed to the symbol. Concurrent calls on the same symbol are serialized automatically, so two simultaneous `commitBuy("SOLUSDT", …)` calls can never race each other to the exchange.
+- **Structured audit log** — after every `commit*` call completes (or throws), a `console.log` record is emitted:
+
+```json
+{
+  "symbol": "SOLUSDT",
+  "action": "buy",
+  "amountUSDT": 20,
+  "averagePrice": 77.56,
+  "date": "2024-11-15T10:32:01.000Z",
+  "status": "success"
+}
+```
+
+The `action` field is one of `"buy"`, `"sell"`, `"trade"`, or `"cancel"`. `status` is `"success"` or `"failed"`.
+
+### WalletPrivateService — raw layer
+
+`WalletPrivateService` makes Binance API calls directly, with no validation or queueing. It is the engine beneath `WalletPublicService` and is exposed on the `wallet` global only for debugging — inspecting raw responses, checking TTL cache state, or calling `clear()` to flush cached data. It should not be used for order placement in normal operation.
+
+The private service applies TTL caching to the two most expensive read operations:
+
+| Method | Cache TTL |
+|---|---|
+| `fetchOrders` | 10 minutes per `symbol+limit` key |
+| `fetchPnl` | 10 minutes per `symbol+limit` key |
+
+A background interval flushes stale entries every 30 seconds. `fetchPrice` is not cached at the private-service level; `WalletPublicService` fetches a fresh price before every commit call.
+
+### DI container
+
+Both services are registered with `di-kit` inside `src/core/provide.ts` and resolved via `inject()` at construction time. The exported `wallet` object contains both services and is also assigned to `globalThis` so the REPL can reach it without an import:
+
+```typescript
+const wallet = {
+  walletPublicService,   // WalletPublicService — use this
+  walletPrivateService,  // WalletPrivateService — debug only
+};
+```
+
+<Note>
+  `WalletPublicService` internally holds a per-symbol `EventListener` instance
+  memoized by symbol string. The execution queue lives on that instance, so
+  calling `getRunner("SOLUSDT")` twice always returns the same queue — calls
+  never bypass serialization by accident.
+</Note>
+
+## What's Included
+
+<CardGroup cols={2}>
+  <Card title="REPL Guide" icon="terminal" href="/repl/overview">
+    All read and mutating commands with expected outputs, tips for dumping
+    results to disk with `fs`, and how to chain commands interactively.
+  </Card>
+  <Card title="Order Management" icon="arrow-right-arrow-left" href="/order-management/concepts">
+    The cancel-verify-sell sequence, poll-with-timeout logic, market fallback
+    behavior, and how `commitCancel` guarantees a clean exit.
+  </Card>
+  <Card title="Broker Adapter" icon="plug" href="/broker-adapter/overview">
+    The full reference adapter wiring these flows into the backtest-kit broker
+    gate, with the three rules for transient-safe order management.
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/wallet-public-service">
+    Complete method signatures for `WalletPublicService` — parameters, return
+    types, validation rules, and audit log fields.
+  </Card>
+</CardGroup>

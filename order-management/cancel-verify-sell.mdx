@@ -1,0 +1,132 @@
+---
+title: "Cancel-Verify-Sell: Safe Position Exit on Binance Spot"
+sidebarTitle: "Cancel-Verify-Sell"
+description: "How commitCancel cancels all open orders, verifies the book is clean, then sells the entire free balance — preventing insufficient-balance errors on spot."
+---
+
+Closing a spot position is not a single `SELL` order — it is a three-step sequence that must be followed in strict order. On Binance spot, any open order locks the asset it needs: a resting SELL holds the base coin, and a resting BUY holds USDT. Sending a new SELL on top of those locks either triggers an `insufficient balance` rejection or silently fills for less than the full position. `commitCancel` (and the `onOrderCloseCommit` hook in the broker adapter example) avoids both failure modes by cancelling every open order on the symbol and confirming the book is empty before a single exit order is placed.
+
+## The Three Steps
+
+<Steps>
+  <Step title="Cancel all open orders">
+    The function fetches `binance.openOrders(symbol)` and cancels each order
+    one by one, sleeping 1 second between cancels to avoid rate-limit bursts.
+    Individual cancel errors are tolerated — if one cancel fails, the loop
+    marks the sweep as incomplete (`isOk = false`) and continues to the next
+    order. The outer loop retries the entire sweep up to **10 rounds**. Only
+    after a full round with no remaining orders (or no errors) does the sweep
+    exit. If the last round still produced an error, that error is re-thrown
+    as a transient failure.
+
+    ```typescript
+    let error;
+    for (let i = 0; i !== 10; i++) {
+      let isOk = true;
+      const orders = await binance.openOrders(symbol);
+      for (const order of orders) {
+        try {
+          await sleep(1_000);
+          await binance.cancel(symbol, order.orderId);
+          error = null;
+        } catch (e) {
+          isOk = false;
+          error = e;
+          continue;
+        }
+      }
+      if (!orders.length) { error = null; break; }
+      if (isOk) { break; }
+    }
+    if (error) throw error;
+    ```
+
+    The design intentionally tolerates partial failures per round. A cancel
+    that races with an exchange-side fill (the order is already gone when the
+    cancel arrives) returns an error, but the next round's `openOrders` fetch
+    will simply not include that order — so the sweep converges regardless.
+  </Step>
+
+  <Step title="Verify the book is clean">
+    Even after every cancel call returns successfully, the exchange may take a
+    moment to settle. The verify loop polls `binance.openOrders(symbol)` up to
+    **10 times** (1-second sleep before each poll). As soon as the list is
+    empty, it clears the error and breaks. If any orders are still present
+    after 10 polls, it throws `"Order not canceled"` as a transient failure —
+    the broker adapter engine will retry the entire close.
+
+    ```typescript
+    let error;
+    for (let i = 0; i !== 10; i++) {
+      await sleep(1_000);
+      const { length: hasOrders } = await binance.openOrders(symbol);
+      if (!hasOrders) { error = null; break; }
+      error = new Error("Order not canceled");
+    }
+    if (error) throw error;
+    ```
+
+    This second check is not redundant. It guards against race conditions where
+    the exchange acknowledges a cancel but the order remains visible in
+    `openOrders` for a brief window, and it also catches cases where a cancel
+    silently failed without throwing.
+  </Step>
+
+  <Step title="Sell the entire free balance">
+    With the book confirmed empty, `commitCancel` reads the free coin balance
+    from `binance.account()`, subtracts the maker fee and one `minQty` unit as
+    a safety buffer, and places a **LIMIT SELL at `price × 0.999`** — slightly
+    below market to favour a fast fill. From here the standard
+    [poll-with-timeout fallback](/order-management/poll-timeout-fallback) takes
+    over: poll every 10 s for up to 10 rounds, then cancel and market-sell the
+    remainder if the limit has not filled.
+
+    ```typescript
+    const quantity =
+      balance.quantity - percentValue(balance.quantity, maker) - minQty;
+
+    const quantity$ = await formatQuantity(symbol, quantity, binance);
+    const averagePrice$ = await formatPrice(
+      symbol,
+      averagePrice * TRADE_SELL_LOWER_PERCENT, // 0.999
+      binance
+    );
+
+    const order = await binance.order(
+      "LIMIT", "SELL", symbol, Number(quantity$), Number(averagePrice$)
+    );
+    ```
+
+    The function returns the average fill price on success, or `0` when there
+    is nothing to sell (see dust handling below).
+  </Step>
+</Steps>
+
+## Dust Handling
+
+Before placing the sell, the function checks whether the computed `quantity` is at or below the exchange's `minQty` filter:
+
+```typescript
+if (quantity <= minQty) {
+  return 0;
+}
+```
+
+If it is, no order is sent and the function returns `0`. This happens when the free balance is so small (dust) that it cannot form a valid order — the position is effectively already exited. The broker adapter treats a `0` return as a clean close confirmation.
+
+## Why Sell the Entire Free Balance
+
+`commitCancel` does not sell just the engine's tracked position size — it sells the **entire free coin balance**. This is intentional. A real account may hold fractions of the coin bought outside the engine (orphan tranches from manual orders, leftover fills from previous sessions). Selling the full free balance ensures the exit is total regardless of what else is on the account, and it sweeps those orphans in the same transaction rather than leaving residue that would trigger the `insufficient balance` guard on future buys.
+
+The same logic applies in `onOrderCloseCommit` in the broker adapter example:
+
+> Position close follows the `commitCancel` flow: cancel every open order on the symbol, then sell the **entire** free coin balance to cash — which also sweeps any orphan tranches bought outside the engine.
+
+<Warning>
+  The throws from Steps 1 and 2 are deliberately transient — they are plain
+  `Error` instances, not `OrderRejectedError`. The broker adapter engine treats
+  them as retryable and re-invokes the close on the next tick with
+  `attempt + 1`. Do not swallow these errors or convert them to a non-throwing
+  return value; the engine relies on the throw to know the close has not
+  completed.
+</Warning>

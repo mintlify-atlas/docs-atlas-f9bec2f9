@@ -1,0 +1,191 @@
+---
+title: "Read-Only REPL Commands: Inspect Balances, Orders, and PnL"
+sidebarTitle: "Read Commands"
+description: "Fetch live price, USDT balance, coin balances, order history, and daily PnL estimates from the REPL without placing any orders."
+---
+
+All read-only commands are non-destructive — they fetch data from Binance and return it without placing, modifying, or canceling any orders. They are the right starting point before any manual trade: confirm the current price, verify your free USDT, and inspect open or recent orders before committing. Some results are cached; see the note at the bottom of this page for cache TTLs and how to bust them.
+
+---
+
+## `fetchPrice(symbol)`
+
+Returns the current average price for a symbol as a `number`, rounded to the exchange's tick size. Internally calls `binance.avgPrice()` and formats the result through the `PRICE_FILTER` tick size for the symbol, so the returned number is always a valid limit-order price on that pair.
+
+**Caching:** Results are cached for **30 seconds** per symbol via a `ttl()` wrapper on the underlying price ticker.
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|---|---|---|
+| `symbol` | `string` | Trading pair, e.g. `"SOLUSDT"` |
+
+**Returns:** `Promise<number>`
+
+```
+repl => await wallet.walletPublicService.fetchPrice("SOLUSDT")
+77.56
+```
+
+---
+
+## `fetchFiat(symbol)`
+
+Returns the total USDT balance for the account — free plus locked — as a `number`. The `symbol` argument is accepted for API consistency with the per-symbol queue, but the USDT balance is account-wide; passing any symbol returns the same value.
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|---|---|---|
+| `symbol` | `string` | Any valid trading pair (used for queue routing only) |
+
+**Returns:** `Promise<number>`
+
+```
+repl => await wallet.walletPublicService.fetchFiat("SOLUSDT")
+150.32
+```
+
+---
+
+## `fetchBalance(symbol)`
+
+Returns the balance for the coin corresponding to `symbol` as `{ quantity, usdt }`. The `quantity` field is the total coin balance including amounts locked in open orders (`onOrder` from the Binance account endpoint). The `usdt` field is `quantity × current price` from the live ticker.
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|---|---|---|
+| `symbol` | `string` | Trading pair whose base coin balance to return, e.g. `"SOLUSDT"` returns the SOL balance |
+
+**Returns:** `Promise<{ quantity: number; usdt: number }>`
+
+```
+repl => await wallet.walletPublicService.fetchBalance("SOLUSDT")
+{
+  "quantity": 2.5,
+  "usdt": 193.90
+}
+```
+
+The underlying `FETCH_BALANCE_FN` function fetches balances for a fixed hardcoded symbol list. Only coins from these pairs are tracked:
+
+```
+BTC, POL, ZEC, HYPE, DOGE, SOL, PENGU, TRX, HBAR, NEAR, FARTCOIN, ETH, PUMP
+```
+
+Calling `fetchBalance` for a symbol whose base coin is not in this list will throw because `fetchBalance` looks up the coin name in the returned map and throws if it is absent.
+
+---
+
+## `fetchOrders(symbol, limit?)`
+
+Returns recent orders for a symbol — including `FILLED`, `CANCELED`, and `NEW` (open) orders — as an `IOrderData[]` array. The result combines currently open orders (from `binance.openOrders()`) prepended in front of recently filled trade history (from `binance.trades()`), both sorted newest-first.
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `symbol` | `string` | — | Trading pair, e.g. `"SOLUSDT"` |
+| `limit` | `number` | `25` | Maximum number of filled/canceled trades to include (open orders are always included regardless) |
+
+**Returns:** `Promise<IOrderData[]>`
+
+**Caching:** Cached for **10 minutes** per `symbol + limit` combination.
+
+Each element in the returned array has the following shape:
+
+```typescript
+interface IOrderData {
+  symbol: string;
+  orderId: number;
+  status: "FILLED" | "CANCELED" | "NEW";
+  amount: string;       // origQty — the original requested quantity
+  executedQty: string;  // actual filled quantity
+  price: string;        // fill price (from trade record) or limit price (for open orders)
+  time: string;         // ISO 8601 timestamp
+  side: "BUY" | "SELL";
+}
+```
+
+```
+repl => await wallet.walletPublicService.fetchOrders("SOLUSDT", 10)
+[
+  {
+    "symbol": "SOLUSDT",
+    "orderId": 4028571930,
+    "status": "NEW",
+    "amount": "0.25",
+    "executedQty": "0.00",
+    "price": "77.20",
+    "time": "2025-01-15T09:45:00.000Z",
+    "side": "SELL"
+  },
+  ...
+]
+```
+
+To dump the full list to a file for easier inspection:
+
+```javascript
+repl => fs.writeFileSync("orders.json", JSON.stringify(await wallet.walletPublicService.fetchOrders("SOLUSDT", 25), null, 2))
+```
+
+---
+
+## `fetchPnl(symbol, limit?)`
+
+Returns a daily PnL estimate reconstructed from trade history and 1-hour OHLCV candles, as an `IDailyPnL[]` array sorted newest-first.
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `symbol` | `string` | — | Trading pair, e.g. `"SOLUSDT"` |
+| `limit` | `number` | `25` | Number of filled trades to use as input (passed to `fetchOrders` internally) |
+
+**Returns:** `Promise<IDailyPnL[]>`
+
+**Caching:** Cached for **10 minutes** per `symbol + limit` combination.
+
+Each element in the returned array has the following shape:
+
+```typescript
+interface IDailyPnL {
+  date: string;          // ISO 8601 day (start of day)
+  pnl: string;           // realized PnL for the day, in USDT, tick-size formatted
+  walletCost: string;    // average cost basis of matched trades that day
+  amountQty: string;     // cumulative coin balance at the end of the day
+  amountUSDT: string;    // amountQty × VWAP (the day's volume-weighted average price)
+  averagePrice: string;  // VWAP derived from 1-hour candles for the day
+}
+```
+
+PnL is computed by matching BUY→SELL pairs with partial fill support. Cross-day trades are handled: a BUY recorded on day N can be matched against a SELL on day N+1 or later. The `averagePrice` for each day is the VWAP of all 1-hour candles within that calendar day, which is also used to convert the end-of-day coin balance into a USDT value.
+
+```
+repl => await wallet.walletPublicService.fetchPnl("SOLUSDT", 25)
+[
+  {
+    "date": "2025-01-15T00:00:00.000Z",
+    "pnl": "3.42",
+    "walletCost": "74.10",
+    "amountQty": "2.5",
+    "amountUSDT": "193.90",
+    "averagePrice": "77.56"
+  },
+  ...
+]
+```
+
+To save the result to a file:
+
+```javascript
+repl => fs.writeFileSync("pnl.json", JSON.stringify(await wallet.walletPublicService.fetchPnl("SOLUSDT", 25), null, 2))
+```
+
+---
+
+<Note>
+**Cache TTLs.** `fetchOrders` and `fetchPnl` are cached for 10 minutes per `symbol + limit` key. `fetchPrice` uses a 30-second cache on the underlying ticker. After a `commit*` operation, `walletPublicService` automatically calls `walletPrivateService.clear()` to flush the orders and PnL caches, so the next read reflects the post-trade state. To flush the cache manually without placing a trade, call `commitReload(symbol)` — or call `wallet.walletPrivateService.clear()` directly to flush all symbols at once.
+</Note>

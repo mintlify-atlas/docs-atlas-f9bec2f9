@@ -1,0 +1,103 @@
+---
+title: "clientOrderId Reconciliation Across Retries"
+sidebarTitle: "ID Reconcile"
+description: "How the broker adapter uses clientOrderId (signalId) to detect duplicate fills before re-sending an order, preventing double entries on network failures."
+---
+
+Network failures during order placement create a particularly dangerous ambiguity: you don't know whether the request reached the exchange. If it did and the order filled, sending the same order again creates a second position the engine never asked for. If it did not, failing to retry means the signal is never acted on. The broker adapter resolves this ambiguity deterministically by querying the exchange for the previous attempt's order before sending anything new.
+
+## The Reconcile Check
+
+The engine passes an `attempt` counter with every call to `onOrderOpenCommit`. On `attempt === 0` (the first try) there is nothing to reconcile. On `attempt > 0`, the previous attempt may have left an order on the exchange. The reconcile check queries by `origClientOrderId` — the `clientOrderId` that was stamped on the original order — and acts on what it finds:
+
+```typescript
+// attempt > 0 means the previous attempt may have reached the exchange
+if (attempt > 0) {
+  const prior = await binance
+    .orderStatus(symbol, undefined, undefined, { origClientOrderId: signalId })
+    .catch(() => null);
+  if (prior?.status === "FILLED") {
+    return; // already bought — confirm without re-sending
+  }
+  if (prior && (prior.status === "NEW" || prior.status === "PARTIALLY_FILLED")) {
+    await binance.cancel(symbol, prior.orderId); // cancel the stale remainder
+  }
+}
+```
+
+The `.catch(() => null)` converts a "not found" 404 response into `null`, which falls through to the fresh-order path below — no special handling needed for the first-attempt case on `attempt > 0`.
+
+## clientOrderId = signalId
+
+The backtest-kit engine assigns every signal a stable `signalId` that is preserved across retries. The broker adapter stamps that value onto every limit order as `newClientOrderId`:
+
+```typescript
+const order = await binance.order("LIMIT", "BUY", symbol, Number(quantity), Number(price), {
+  newClientOrderId: signalId,
+});
+```
+
+This makes `signalId` the **idempotency anchor** for the reconcile. On retry, `origClientOrderId: signalId` points back to exactly the order placed by the previous attempt — even if the network dropped the response before it arrived at the caller.
+
+## Binance Duplicate-clientOrderId Limitation
+
+Binance enforces `clientOrderId` uniqueness only among **open** orders. Once an order is filled or cancelled, its `clientOrderId` is freed and could, in theory, be reused. More importantly: if an order fills instantaneously (status goes directly to `"FILLED"` before any deduplication check), Binance's own guard would not block a second order with the same `clientOrderId`.
+
+This is exactly why the explicit reconcile check above is required. Rather than relying on Binance to reject the duplicate, the adapter proactively queries for the previous order and returns early if it is already filled — before the new order request is even constructed.
+
+> **Note** — This limitation is documented in the README: "Binance's duplicate-`clientOrderId` guard only covers **open** orders; an instantly filled one would not be deduplicated."
+
+## Three Outcomes
+
+The reconcile check has exactly three possible outcomes, each leading to a different execution path:
+
+<Steps>
+  <Step title="FILLED — confirm without re-sending">
+    The previous attempt filled successfully but the response was lost in
+    transit. Returning without sending a new order causes the engine to record
+    the position as open. The position is now live exactly once.
+
+    ```typescript
+    if (prior?.status === "FILLED") {
+      return; // the position was already opened by the previous attempt
+    }
+    ```
+  </Step>
+
+  <Step title="NEW or PARTIALLY_FILLED — cancel stale order, then proceed">
+    The previous attempt placed an order that is still resting (or partially
+    filled) on the book. Leaving it alive would risk a surprise fill at a stale
+    price. The adapter cancels it, then falls through to place a fresh order
+    with updated price and quantity — as if this were the first attempt.
+
+    ```typescript
+    if (prior && (prior.status === "NEW" || prior.status === "PARTIALLY_FILLED")) {
+      await binance.cancel(symbol, prior.orderId); // kill the stale remainder
+    }
+    // falls through to the normal order-placement path below
+    ```
+  </Step>
+
+  <Step title="Not found / null — proceed as normal">
+    Either the previous attempt never reached the exchange (the request failed
+    before hitting Binance), or the order was already cleaned up. The adapter
+    proceeds to place a fresh order exactly as it would on the first attempt.
+    No special action is needed.
+  </Step>
+</Steps>
+
+## Terminal Rejection on the Fifth Attempt
+
+The engine's default retry budget is five attempts (`CC_ORDER_OPEN_RETRY_ATTEMPTS = 5`), so `attempt` arrives as 0–4. When `attempt === 4` (the last try) and the limit order still does not fill within the poll window, the adapter throws `OrderRejectedError` rather than a plain `Error`:
+
+```typescript
+if (attempt >= LAST_OPEN_ATTEMPT) {
+  throw new OrderRejectedError(
+    `entry ${signalId} not filled after ${attempt + 1} attempts — giving up`
+  );
+}
+```
+
+`OrderRejectedError` is the terminal signal to the engine: it consumes the `signalId` into `lastPendingId`, ensuring this signal is never re-issued. A plain `Error` on earlier attempts is transient — the engine retries with the same `signalId` (incremented `attempt`) and the reconcile check at the top of the next call handles whatever state the previous try left behind.
+
+For the full adapter implementation including all hooks and the terminal-rejection path, see [Order Open Adapter](/broker-adapter/order-open).

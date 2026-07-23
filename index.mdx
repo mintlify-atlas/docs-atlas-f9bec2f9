@@ -1,20 +1,59 @@
 ---
-title: "Introduction"
-description: "Welcome to your project"
+title: "Wallet Manager: Binance Spot Order Management for backtest-kit"
+sidebarTitle: "Home"
+description: "Interactive REPL and reference broker-adapter toolkit for Binance spot trading. Encodes the correct cancel-verify-sell sequence so your adapter never gets stuck with frozen funds."
 ---
 
-Write a short description of your product here. What it does, who it's for, and what they can accomplish with it.
+Wallet Manager is a Binance spot wallet toolkit built for two jobs: driving the exchange by hand through an interactive REPL, and serving as the canonical reference implementation for the exchange side of a [backtest-kit](https://github.com/backtest-kit) broker adapter. It encodes the correct order-management sequence—cancel pending orders, verify the book is clean, then sell—so you never hit an "insufficient balance" error caused by funds locked in a resting order.
 
-<Tip>
-  Ready to make this your own? Start by editing this page. Update your `docs.json` file to customize your site. Then fill out the [Quickstart](/quickstart) page.
-</Tip>
+<Warning>
+  **Live keys, real money.** Every `commit*` call places real orders on Binance spot. There is no dry-run mode. Always verify your intent before executing mutating commands.
+</Warning>
 
-<Card title="Quickstart" icon="rocket" href="/quickstart">
-  This card links to the quickstart page in your project.
-</Card>
-<Card title="Components" icon="puzzle-piece" href="https://mintlify.com/docs/components">
-  Add cards, callouts, steps, tabs, and more to design and structure your pages.
-</Card>
-<Card title="Settings" icon="gear" href="https://mintlify.com/docs/organize/settings">
-  Set your site name, branding, and navigation in the `docs.json` file.
-</Card>
+<CardGroup cols={2}>
+  <Card title="Introduction" icon="book-open" href="/introduction">
+    Understand the architecture, the two service layers, and why the cancel-verify-sell sequence matters.
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Set up your API keys, install dependencies, and run your first REPL session in minutes.
+  </Card>
+  <Card title="REPL Guide" icon="terminal" href="/repl/overview">
+    Explore the interactive REPL: read balances, inspect orders, and execute trades without code changes.
+  </Card>
+  <Card title="Broker Adapter" icon="plug" href="/broker-adapter/overview">
+    Wire the wallet flows into a backtest-kit broker adapter with the three rules for safe order management.
+  </Card>
+</CardGroup>
+
+## How it works
+
+Wallet Manager wraps `node-binance-api` in a DI-wired service layer with two tiers:
+
+- **`WalletPublicService`** — the recommended entry point. Validates inputs, serializes per-symbol execution to prevent race conditions, and emits a structured audit log after every commit.
+- **`WalletPrivateService`** — the raw Binance layer underneath. TTL-cached prices (30 s), orders (10 min), and PnL (10 min). Use for debugging only.
+
+<CardGroup cols={2}>
+  <Card title="Order Management Concepts" icon="gears" href="/order-management/concepts">
+    Learn the three patterns — cancel-verify-sell, poll-timeout-fallback, and clientOrderId reconcile — that prevent stuck positions.
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/wallet-public-service">
+    Full method signatures, parameter types, and return values for WalletPublicService.
+  </Card>
+</CardGroup>
+
+## Core flows at a glance
+
+<Steps>
+  <Step title="Buy">
+    `commitBuy(symbol, amountUSDT)` — places a limit BUY at `price × 1.001`, polls for up to 100 s, then cancels and market-buys the remainder if the limit does not fill.
+  </Step>
+  <Step title="Sell">
+    `commitSell(symbol, amountUSDT)` — places a limit SELL at `price × 0.999`, same poll loop and market-sell fallback.
+  </Step>
+  <Step title="Trade with brackets">
+    `commitTrade(symbol, amountUSDT, takeProfit, stopLoss)` — buys via the `commitBuy` flow then immediately protects the position with an OCO (take-profit + stop-loss) sell order.
+  </Step>
+  <Step title="Flatten">
+    `commitCancel(symbol)` — cancels ALL open orders on the symbol, verifies the book is clean, then sells the entire free coin balance to USDT. The safe exit path for any position.
+  </Step>
+</Steps>

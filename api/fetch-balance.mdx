@@ -1,0 +1,61 @@
+---
+title: "fetchBalance: Coin Balance Including Locked Amounts"
+sidebarTitle: "fetchBalance"
+description: "fetchBalance returns the quantity and USDT value of the coin for a given symbol, including amounts locked in open orders."
+---
+
+`fetchBalance` returns the current coin balance for the asset associated with a trading pair symbol. The balance includes both the free (tradeable) portion and any quantity currently locked in open orders (`onOrder`), giving a complete picture of how much of the coin the account holds regardless of pending activity. The returned USDT value is computed at the current spot price.
+
+## Signature
+
+```typescript
+fetchBalance(symbol: string): Promise<{ usdt: number; quantity: number }>
+```
+
+## Parameters
+
+<ParamField path="symbol" type="string" required>
+  Binance trading pair symbol, e.g. `"SOLUSDT"`. The coin name is extracted by stripping `"USDT"` from the symbol string. The coin must be in the supported symbol list (see below) or the call will throw.
+</ParamField>
+
+## Returns
+
+<ResponseField name="quantity" type="number">
+  Total coin quantity held on the account: `free + onOrder`. This includes amounts locked in any open limit orders, OCO brackets, or stop-loss orders on the symbol.
+</ResponseField>
+
+<ResponseField name="usdt" type="number">
+  The USDT value of the total coin quantity: `quantity × currentPrice`. The price used is fetched from `binance.prices()` at the time of the call.
+</ResponseField>
+
+## Supported symbols
+
+`fetchBalance` queries balances for a fixed hardcoded list of coins. If the coin derived from the `symbol` argument is not in this list, the function throws an error. The supported symbols are:
+
+| Symbol | Coin |
+|---|---|
+| BTCUSDT | BTC |
+| POLUSDT | POL |
+| ZECUSDT | ZEC |
+| HYPEUSDT | HYPE |
+| DOGEUSDT | DOGE |
+| SOLUSDT | SOL |
+| PENGUUSDT | PENGU |
+| TRXUSDT | TRX |
+| HBARUSDT | HBAR |
+| NEARUSDT | NEAR |
+| FARTCOINUSDT | FARTCOIN |
+| ETHUSDT | ETH |
+| PUMPUSDT | PUMP |
+
+## Example
+
+```typescript
+const balance = await wallet.walletPublicService.fetchBalance("SOLUSDT");
+console.log(balance);
+// { quantity: 2.5, usdt: 193.90 }
+
+if (balance.quantity === 0) {
+  console.log("No SOL held on account");
+}
+```

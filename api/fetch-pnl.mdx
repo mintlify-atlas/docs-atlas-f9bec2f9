@@ -1,0 +1,78 @@
+---
+title: "fetchPnl: Daily PnL Estimate from Trade History"
+sidebarTitle: "fetchPnl"
+description: "fetchPnl computes daily realized PnL by matching BUY/SELL pairs with partial-fill support, augmenting each day with VWAP from 1-hour candles."
+---
+
+`fetchPnl` reconstructs a daily realized PnL history from the recent trade log. It filters to filled orders only, groups them by calendar day, and matches BUY→SELL pairs using a partial-fill-aware algorithm that also handles cross-day trades (a buy on day N matched against a sell on day N+1 or later). For each day that has realized PnL, it fetches a VWAP from Binance's 1-hour candles to compute the current portfolio value at day-end. Results are returned sorted most-recent-first.
+
+## Signature
+
+```typescript
+fetchPnl(symbol: string, limit?: number): Promise<IDailyPnL[]>
+```
+
+## Parameters
+
+<ParamField path="symbol" type="string" required>
+  Binance trading pair symbol, e.g. `"SOLUSDT"`.
+</ParamField>
+
+<ParamField path="limit" type="number">
+  Number of historical orders to use as the basis for PnL calculation. Defaults to `25`. This maps directly to the `limit` parameter of the underlying `fetchOrders` call.
+</ParamField>
+
+## Returns
+
+<ResponseField name="pnlList" type="IDailyPnL[]">
+  An array of daily PnL records sorted most-recent-first. Only days with at least one realized BUY→SELL match are included. Each record conforms to the `IDailyPnL` interface:
+
+  ```typescript
+  interface IDailyPnL {
+    date: string;          // ISO 8601 timestamp for the start of the day
+    pnl: string;           // realized PnL for the day in USDT
+    walletCost: string;    // average cost basis of the traded quantity for the day
+    amountQty: string;     // cumulative coin balance at end of the day
+    amountUSDT: string;    // amountQty × VWAP for the day
+    averagePrice: string;  // VWAP derived from 1-hour candles for the day
+  }
+  ```
+
+  All numeric fields are returned as strings rounded to the exchange's `PRICE_FILTER` `tickSize` or `LOT_SIZE` `stepSize` as appropriate.
+</ResponseField>
+
+## Algorithm
+
+1. **Filter**: only `FILLED` orders from the `fetchOrders` result are considered.
+2. **Group by day**: orders are grouped into a `Map<dayStamp, { buys, sells }>` using `getMomentStamp` from `get-moment-stamp`.
+3. **Cross-day support**: for each day, the SELL side includes sells from the current day and all future days in the dataset, so a buy on day N is properly matched against a sell on day N+2.
+4. **Partial fill matching** (`processPartialMatching`): buys and sells within each processing window are sorted chronologically. Each buy is matched greedily against future sells, consuming as much quantity as available. A `usedSells` map tracks remaining sell quantity across iterations so a single sell is never counted more than once.
+5. **Cumulative balance**: a separate pass over all filled orders in chronological order accumulates the coin balance day-by-day (`BUY` adds `executedQty`, `SELL` subtracts it, floored at zero).
+6. **VWAP per day**: for each day with PnL, `binance.candles(symbol, "1h", { startTime, endTime })` fetches all 1-hour candles for that calendar day. VWAP is computed as `Σ(closePrice × volume) / Σ(volume)`.
+7. **Formatting**: all numeric values are rounded via `roundTicks` to exchange precision before being returned.
+
+## Caching
+
+Results are cached for 10 minutes (`PNL_TTL = 10 * 60 * 1_000`) keyed by `symbol-limit` inside `WalletPrivateService`. The cache is shared with `fetchOrders` and is busted by the same `walletPrivateService.clear()` call that runs after every `commit*` operation. To manually refresh without placing an order, call `commitReload(symbol)`.
+
+## Example
+
+```typescript
+const pnl = await wallet.walletPublicService.fetchPnl("SOLUSDT", 25);
+console.log(pnl);
+// [
+//   {
+//     date: "2025-01-15T00:00:00.000Z",
+//     pnl: "1.23",
+//     walletCost: "75.40",
+//     amountQty: "2.50",
+//     amountUSDT: "193.90",
+//     averagePrice: "77.56"
+//   },
+//   ...
+// ]
+
+// Save to file for further analysis:
+import fs from "fs";
+fs.writeFileSync("pnl.json", JSON.stringify(pnl, null, 2));
+```

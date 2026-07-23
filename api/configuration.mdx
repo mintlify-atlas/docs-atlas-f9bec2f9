@@ -1,0 +1,100 @@
+---
+title: "Configuration: Environment Variables and Build Settings"
+sidebarTitle: "Configuration"
+description: "Wallet Manager is configured via two environment variables: CC_BINANCE_API_KEY and CC_BINANCE_API_SECRET, loaded from a .env file via dotenv."
+---
+
+Wallet Manager has a deliberately minimal configuration surface. The only runtime inputs it needs are your Binance API credentials, supplied as two environment variables in a `.env` file at the project root. When you run `npm start`, `dotenv` loads that file before the REPL process starts, making the variables available to `src/config/params.ts` which exports them for use throughout the service layer. There are no configuration files, no YAML, and no flags — credentials in `.env` is the entire configuration model.
+
+## Environment variables
+
+<ParamField body="CC_BINANCE_API_KEY" type="string" required>
+  Your Binance API key. Used to authenticate every request sent to the Binance REST API via `node-binance-api`. If this value is empty at startup, the first call to `getBinance()` throws `"Binance API KEY is empty"` and clears the singleshot lock so the next call retries.
+</ParamField>
+
+<ParamField body="CC_BINANCE_API_SECRET" type="string" required>
+  Your Binance API secret. Used to sign every authenticated request. If this value is empty, `getBinance()` throws `"Binance API SECRET is empty"` under the same retry semantics as the missing key.
+</ParamField>
+
+## `.env` file setup
+
+Create a file named `.env` in the wallet-manager project root and populate it with your credentials:
+
+```bash .env
+CC_BINANCE_API_KEY=your_api_key_here
+CC_BINANCE_API_SECRET=your_api_secret_here
+```
+
+<Warning>
+  Never commit `.env` to version control. Add `.env` to your `.gitignore` immediately — your API secret grants full trading access to your account and must not appear in any repository, even a private one.
+</Warning>
+
+## Obtaining API credentials
+
+<Steps>
+  <Step title="Log in to Binance">
+    Go to [binance.com](https://www.binance.com) and sign in to your account.
+  </Step>
+  <Step title="Open API Management">
+    Navigate to **Account → API Management** from the user menu in the top-right corner.
+  </Step>
+  <Step title="Create a new API key">
+    Click **Create API** and choose a label. Complete any 2FA challenge Binance requires.
+  </Step>
+  <Step title="Set permissions">
+    Enable only the permissions Wallet Manager needs (see the table below). Leave everything else disabled, especially withdrawals.
+  </Step>
+  <Step title="Restrict to your IP">
+    Under **IP access restrictions**, add your server or workstation IP. A key locked to a specific IP cannot be used even if it leaks.
+  </Step>
+  <Step title="Copy key and secret">
+    Copy both values immediately — **the secret is shown only once**. Store them securely (e.g. a password manager) before closing the page.
+  </Step>
+</Steps>
+
+## Required API key permissions
+
+| Permission | Required |
+|---|---|
+| ✅ Enable Reading | Yes — needed for balance, price, and order queries |
+| ✅ Enable Spot & Margin Trading | Yes — needed for all `commit*` operations |
+| ❌ Enable Withdrawals | **No — do not enable** |
+
+Wallet Manager only places and cancels spot orders and reads account data. Withdrawal permission is not needed and should be left disabled to limit the blast radius of a compromised key.
+
+## How credentials are used in the code
+
+`src/config/params.ts` reads both variables from `process.env` and falls back to an empty string so the module always exports a string (never `undefined`):
+
+```typescript
+// src/config/params.ts
+export const CC_BINANCE_API_KEY = process.env.CC_BINANCE_API_KEY || "";
+export const CC_BINANCE_API_SECRET = process.env.CC_BINANCE_API_SECRET || "";
+```
+
+These exports are consumed by `getBinance()` in `WalletPrivateService`. If either is an empty string at the time of the first API call, the factory throws immediately with a descriptive error and clears its `singleshot` lock — so fixing the `.env` file and making another call is enough to recover, without restarting the process.
+
+## `recvWindow`
+
+The Binance client is initialised with `recvWindow: 60000` (60 seconds). This is the window Binance uses for timestamp validation: a request whose timestamp differs from the server clock by more than `recvWindow` milliseconds is rejected. The generous 60-second window prevents spurious authentication failures on hosts whose system clock is slightly out of sync.
+
+<Note>
+  `useServerTime: true` is also set in the client options, which instructs `node-binance-api` to call `useServerTime()` on init and align the local request timestamps with Binance's server clock. This happens automatically inside `getBinance()` before the instance is returned to any caller.
+</Note>
+
+## Build configuration
+
+Wallet Manager uses [Rollup](https://rollupjs.org) to compile `src/index.ts` to `build/index.mjs`. The `npm start` script runs the build step first, then launches the REPL with credentials injected via `dotenv`:
+
+```bash
+npm run build  # Rollup + TypeScript → build/index.mjs
+npm start      # build + dotenv + REPL
+```
+
+The `npm start` script expands to:
+
+```bash
+npm run build && dotenv -e .env -- node ./scripts/repl.mjs
+```
+
+This means every `npm start` produces a fresh build from source before opening the REPL — edits to `src/` are always reflected on the next start without a separate build step.

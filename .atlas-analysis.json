@@ -1,0 +1,123 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "Wallet Manager",
+  "projectDescription": "A Binance spot wallet toolkit providing an interactive REPL and reference broker-adapter order-management flows for backtest-kit, encoding the correct cancel-verify-sell sequence to safely exit positions.",
+  "theme": "luma",
+  "primaryColor": "#F0B90B",
+  "lightColor": "#FCD535",
+  "darkColor": "#B88A00",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "REPL Guide",
+            "pages": [
+              "repl/overview",
+              "repl/read-commands",
+              "repl/mutating-commands"
+            ]
+          },
+          {
+            "group": "Order Management",
+            "pages": [
+              "order-management/concepts",
+              "order-management/cancel-verify-sell",
+              "order-management/poll-timeout-fallback",
+              "order-management/clientorderid-reconcile"
+            ]
+          },
+          {
+            "group": "Broker Adapter",
+            "pages": [
+              "broker-adapter/overview",
+              "broker-adapter/order-open",
+              "broker-adapter/order-close",
+              "broker-adapter/testing"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "WalletPublicService",
+            "pages": [
+              "api/wallet-public-service",
+              "api/commit-buy",
+              "api/commit-sell",
+              "api/commit-trade",
+              "api/commit-cancel",
+              "api/fetch-price",
+              "api/fetch-balance",
+              "api/fetch-fiat",
+              "api/fetch-orders",
+              "api/fetch-pnl"
+            ]
+          },
+          {
+            "group": "Internals",
+            "pages": [
+              "api/wallet-private-service",
+              "api/configuration"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Interactive REPL for live exchange operations (buy/sell/flatten/inspect) without touching the trading engine",
+    "Reference broker-adapter implementation for backtest-kit with correct order-management sequence",
+    "cancel-verify-sell pattern: cancel all open orders, verify clean book, then sell — prevents insufficient-balance errors on spot",
+    "Poll-with-timeout and market-order fallback: limit orders never stay resting on the book after a timeout",
+    "clientOrderId (signalId) reconciliation across retries to prevent duplicate fills on lost responses",
+    "Per-symbol serialized execution queue in WalletPublicService preventing race conditions",
+    "TTL-cached price (30s), orders (10m), and PnL (10m) to reduce API load",
+    "Daily PnL estimation with VWAP from 1h candles and partial-fill cross-day matching",
+    "OCO (take-profit + stop-loss) order placement via commitTrade",
+    "DI-wired service layer using di-kit for clean dependency injection"
+  ],
+  "publicApiSurface": [
+    "wallet.walletPublicService.commitBuy(symbol, amountUSDT) => Promise<number>",
+    "wallet.walletPublicService.commitSell(symbol, amountUSDT) => Promise<number>",
+    "wallet.walletPublicService.commitTrade(symbol, amountUSDT, takeProfitPrice, stopLossPrice) => Promise<0 | { status, content }>",
+    "wallet.walletPublicService.commitCancel(symbol) => Promise<number>",
+    "wallet.walletPublicService.commitReload(symbol) => Promise<void>",
+    "wallet.walletPublicService.fetchPrice(symbol) => Promise<number>",
+    "wallet.walletPublicService.fetchBalance(symbol) => Promise<{ usdt, quantity }>",
+    "wallet.walletPublicService.fetchFiat(symbol) => Promise<number>",
+    "wallet.walletPublicService.fetchOrders(symbol, limit?) => Promise<IOrderData[]>",
+    "wallet.walletPublicService.fetchPnl(symbol, limit?) => Promise<IDailyPnL[]>",
+    "wallet.walletPrivateService.commitBuy(symbol, amountUSDT, averagePrice) => Promise<number>",
+    "wallet.walletPrivateService.commitSell(symbol, amountUSDT, averagePrice) => Promise<number>",
+    "wallet.walletPrivateService.commitTrade(symbol, amountUSDT, averagePrice, takeProfitPrice, stopLossPrice) => Promise<0 | { status, content }>",
+    "wallet.walletPrivateService.commitCancel(symbol, averagePrice) => Promise<number>",
+    "wallet.walletPrivateService.fetchBalance() => Promise<Record<string, { usdt, quantity }>>",
+    "wallet.walletPrivateService.fetchPrice(symbol) => Promise<number>",
+    "wallet.walletPrivateService.fetchFiat() => Promise<number>",
+    "wallet.walletPrivateService.fetchOrders(symbol, limit) => Promise<IOrderData[]>",
+    "wallet.walletPrivateService.fetchPnl(symbol, limit) => Promise<IDailyPnL[]>",
+    "wallet.walletPrivateService.clear() => void",
+    "COMMIT_BUY_FN({ amountUSDT, averagePrice, symbol }, binance) => Promise<number>",
+    "COMMIT_SELL_FN({ amountUSDT, averagePrice, symbol }, binance) => Promise<number>",
+    "COMMIT_TRADE_FN({ amountUSDT, averagePrice, takeProfitPrice, stopLossPrice, symbol }, binance) => Promise<0 | { status, content }>",
+    "COMMIT_CANCEL_FN({ symbol, averagePrice }, binance) => Promise<number>",
+    "FETCH_BALANCE_FN(binance) => Promise<Record<string, { usdt, quantity }>>",
+    "FETCH_PRICE_FN({ symbol }, binance) => Promise<number>",
+    "FETCH_FIAT_FN(binance) => Promise<number>",
+    "FETCH_ORDERS_FN({ symbol, limit }, binance) => Promise<IOrderData[]>",
+    "FETCH_PNL_FN({ orders, symbol }, binance) => Promise<IDailyPnL[]>",
+    "IOrderData: { symbol, orderId, status, amount, executedQty, price, time, side }",
+    "IDailyPnL: { date, pnl, walletCost, amountQty, amountUSDT, averagePrice }"
+  ]
+}

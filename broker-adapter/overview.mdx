@@ -1,0 +1,78 @@
+---
+title: "backtest-kit Broker Adapter: Reference Spot Implementation"
+sidebarTitle: "Overview"
+description: "Wallet Manager is the reference broker-adapter implementation for backtest-kit. Three rules govern safe order management: no resting orders on throw, attempt reconcile, and terminal rejection."
+---
+
+Wallet Manager is the canonical reference implementation for the exchange side of a [backtest-kit](https://github.com/backtest-kit) broker adapter. It wraps `node-binance-api` in a small DI-wired service layer and demonstrates the exact order-management flows — post, poll, cancel, market fallback — that every production adapter must get right. The two hooks the adapter exposes (`onOrderOpenCommit` and `onOrderCloseCommit`) are governed by three strict rules that together guarantee the engine's state and the exchange's live book stay in sync even when network requests are lost, throttled, or only partially confirmed.
+
+## The Three Rules
+
+Every safe broker adapter implementation encodes the same three invariants. Breaking any one of them leads to ghost orders, missed fills, or duplicate entries that the engine has no way to reconcile.
+
+<Steps>
+  <Step title="Rule 1 — No resting orders on a transient throw">
+    A transient throw must **never** leave an order resting on the exchange. Before throwing, cancel the unfilled order and market-out any partial fill. Every "will retry" that leaves a live order on the book risks that order filling on its own later — the engine will know nothing about it, and the position will be silently orphaned.
+  </Step>
+  <Step title="Rule 2 — Reconcile by clientOrderId on retry">
+    `payload.attempt > 0` means the previous attempt **may have reached the exchange**. The engine passes `attempt` for exactly this reason. Before posting again, look up the order by `origClientOrderId = signalId`. A lost response to a filled order must resolve to "already bought", not to a second buy. Note: Binance's duplicate-`clientOrderId` guard only covers **open** orders — an instantly filled order would not be deduplicated, so you cannot rely on the exchange to block the double-send.
+  </Step>
+  <Step title="Rule 3 — The fifth attempt is terminal">
+    The engine's default retry budget is `CC_ORDER_OPEN_RETRY_ATTEMPTS = 5`, so `attempt` arrives as 0–4 and `attempt === 4` is the last try. On that attempt: cancel the order, market-sell whatever was actually bought (`executedQty`), and throw `OrderRejectedError`. The terminal rejection causes the engine to consume the signal id into `lastPendingId` so the signal is never re-issued. A plain `Error` is treated as transient and the engine keeps retrying.
+  </Step>
+</Steps>
+
+## Key Constants
+
+These five constants appear throughout both hooks and govern the timing and safety margins of every order lifecycle:
+
+```typescript
+const FILL_POLL_ATTEMPTS = 10;          // 10 checks ...
+const FILL_POLL_INTERVAL_MS = 10_000;   // ... every 10 seconds = up to ~100s
+const LAST_OPEN_ATTEMPT = 4;            // fifth try under CC_ORDER_OPEN_RETRY_ATTEMPTS = 5
+const CANCEL_ROUNDS = 10;              // cancel sweeps while flattening on close
+const TRADE_SELL_LOWER_PERCENT = 0.999; // exit limit price slightly below market
+```
+
+`FILL_POLL_ATTEMPTS × FILL_POLL_INTERVAL_MS` gives a ~100-second window before the timeout path triggers Rule 1. `CANCEL_ROUNDS` applies to **both** the cancel sweep loop and the verify loop in `onOrderCloseCommit` — each runs up to 10 iterations independently. `TRADE_SELL_LOWER_PERCENT` nudges the limit sell price 0.1% below market so it crosses the book faster without resorting immediately to a market order.
+
+## Adapter Skeleton
+
+The full adapter extends `BrokerBase`, overrides the two commit hooks, and registers itself with the engine in two lines. `waitForInit` is the recommended place to eagerly warm the Binance client singleton and run any startup orphan sweep:
+
+```typescript
+class SpotBroker extends BrokerBase {
+  override async waitForInit() {
+    await getBinance(); // warm the singleton; also a good place for startup orphan sweep
+  }
+
+  override async onOrderOpenCommit(payload: BrokerOrderOpenPayload) { ... }
+
+  override async onOrderCloseCommit(payload: BrokerOrderClosePayload) { ... }
+
+  // onOrderActiveCheck / onPartial*Commit and the remaining hooks —
+  // BrokerBase provides defaults for anything not overridden
+}
+
+Broker.useBrokerAdapter(SpotBroker);
+Broker.enable();
+```
+
+`BrokerBase` provides safe no-op defaults for every hook not overridden — only the two commit methods need custom logic for a minimal working adapter.
+
+## Explore the Implementation
+
+<CardGroup cols={2}>
+  <Card title="Order Open" icon="arrow-up-right" href="/broker-adapter/order-open">
+    Full walkthrough of `onOrderOpenCommit`: backtest guard, clientOrderId reconcile, limit placement, fill polling, and terminal rejection.
+  </Card>
+  <Card title="Order Close" icon="arrow-down-right" href="/broker-adapter/order-close">
+    Full walkthrough of `onOrderCloseCommit`: cancel all open orders, verify clean book, sell entire free coin balance including orphan tranches.
+  </Card>
+  <Card title="Testing" icon="flask" href="/broker-adapter/testing">
+    Use the `--brokerdebug` CLI flag to dry-fire any single hook against the live adapter before waiting for a real signal.
+  </Card>
+  <Card title="clientOrderId Reconcile" icon="rotate" href="/order-management/clientorderid-reconcile">
+    Deep dive into the idempotency anchor — how `signalId` as `clientOrderId` makes retry reconciliation safe across lost responses.
+  </Card>
+</CardGroup>

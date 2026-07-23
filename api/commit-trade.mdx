@@ -1,0 +1,110 @@
+---
+title: "commitTrade: Buy with OCO Take-Profit and Stop-Loss Brackets"
+sidebarTitle: "commitTrade"
+description: "commitTrade buys via the commitBuy flow then immediately places an OCO (take-profit + stop-loss limit) sell order to protect the position."
+---
+
+`commitTrade` is a compound operation that opens a position and immediately brackets it with a protective OCO (One-Cancels-the-Other) sell order in a single call. Internally it runs the full `commitBuy` flow — including its open-order and balance guards — then computes the actual filled coin quantity (adjusted for maker fees and exchange `minQty`), and submits an OCO sell with a TAKE_PROFIT_LIMIT leg above market and a STOP_LOSS_LIMIT leg below market. After placing the OCO, it polls `openOrders` for up to 10 seconds to confirm the brackets are live before returning.
+
+<Warning>
+`commitTrade` places real orders on Binance spot: a limit buy entry and an OCO bracket sell. Both sides commit live funds. There is no dry-run mode. If the OCO placement fails after the buy has already filled, the position is open without protection — handle the thrown error accordingly.
+</Warning>
+
+## Signature
+
+```typescript
+commitTrade(
+  symbol: string,
+  amountUSDT: number,
+  takeProfitPrice: number,
+  stopLossPrice: number
+): Promise<0 | { status: string; content: string }>
+```
+
+## Parameters
+
+<ParamField path="symbol" type="string" required>
+  Binance trading pair symbol, e.g. `"SOLUSDT"`.
+</ParamField>
+
+<ParamField path="amountUSDT" type="number" required>
+  The amount in USDT to spend on the buy leg. Subject to the same `commitBuy` guards: returns `0` if there are open orders or the balance is insufficient.
+</ParamField>
+
+<ParamField path="takeProfitPrice" type="number" required>
+  The price at which the TAKE_PROFIT_LIMIT leg of the OCO will trigger. Must be a positive finite number strictly greater than the current market price.
+</ParamField>
+
+<ParamField path="stopLossPrice" type="number" required>
+  The price at which the STOP_LOSS_LIMIT leg of the OCO will trigger. Must be a positive finite number strictly less than the current market price and strictly less than `takeProfitPrice`.
+</ParamField>
+
+## Returns
+
+<ResponseField name="result" type="0 | { status: string; content: string }">
+  Returns `0` if no trade was placed (open orders exist or USDT balance is insufficient — same conditions as `commitBuy`). On success, returns `{ status: "ok", content: string }` where `content` is a human-readable summary of the buy fill and the OCO bracket prices and values.
+</ResponseField>
+
+## Validation rules
+
+`WalletPublicService` validates all price arguments before fetching the market price or touching the exchange. Any violation throws an `Error` with a descriptive message:
+
+| Rule | Error message |
+|---|---|
+| `takeProfitPrice` is not a finite number | `"take-profit price must be a valid number"` |
+| `stopLossPrice` is not a finite number | `"stop-loss price must be a valid number"` |
+| `stopLossPrice >= averagePrice` | `"stop-loss price must be less than average price"` |
+| `takeProfitPrice <= averagePrice` | `"take-profit price must be greater than average price"` |
+| `stopLossPrice > takeProfitPrice` | `"stop-loss price is greater than take-profit price"` |
+| `stopLossPrice <= 0` | `"stop-loss price must be greater than zero"` |
+| `takeProfitPrice <= 0` | `"take-profit price must be greater than zero"` |
+
+## Execution flow
+
+1. `WalletPublicService` fetches the current average price, then validates all four price arguments against the rules above.
+2. The call enters the per-symbol execution queue.
+3. `COMMIT_TRADE_FN` checks for open orders and free USDT balance; returns `0` if either guard fails.
+4. The pre-buy coin balance is snapshotted via `FETCH_BALANCE_FN`.
+5. `COMMIT_BUY_FN` is executed to perform the buy (limit → poll → market fallback).
+6. The post-buy coin balance is snapshotted again. The actual filled quantity for the OCO is:
+   ```
+   orderQuantity = (balanceAfter.quantity - balanceBefore.quantity)
+                 - makerFeePercent(orderQuantity)
+                 - minQty
+   ```
+7. After a 1-second delay, the OCO sell order is placed with the following parameters:
+
+```typescript
+{
+  belowType: "STOP_LOSS_LIMIT",
+  belowPrice: stopLossPrice * 0.999,       // limit price for the stop leg
+  belowStopPrice: stopLossPrice,           // trigger price
+  belowTimeInForce: "GTC",
+
+  aboveType: "TAKE_PROFIT_LIMIT",
+  aboveStopPrice: takeProfitPrice,         // trigger price
+  abovePrice: takeProfitPrice * 1.001,     // limit price for the take-profit leg
+  aboveTimeInForce: "GTC",
+}
+```
+
+8. `openOrders` is polled up to 10 times (1-second interval) to verify the OCO brackets are live. Throws if no open orders appear after all retries.
+9. A trade report string is assembled and returned as `{ status: "ok", content: report }`.
+
+## Example
+
+```typescript
+const result = await wallet.walletPublicService.commitTrade(
+  "SOLUSDT",
+  20,
+  85.0,  // take profit
+  74.0   // stop loss
+);
+
+if (result === 0) {
+  console.log("No trade — open orders exist or balance insufficient");
+} else {
+  console.log(result.status);   // "ok"
+  console.log(result.content);  // human-readable trade summary
+}
+```

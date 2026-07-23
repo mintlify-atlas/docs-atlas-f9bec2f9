@@ -1,0 +1,56 @@
+---
+title: "commitSell: Limit Sell with Poll and Market Fallback"
+sidebarTitle: "commitSell"
+description: "commitSell places a limit SELL at price × 0.999, polls every 10 s for up to 100 s, then cancels and market-sells the remainder if the limit does not fill."
+---
+
+`commitSell` sells a specified USDT-denominated value of coin on Binance spot. It converts the USDT amount to a coin quantity at the current average price, places a LIMIT SELL slightly below market to encourage a quick fill, and runs the same poll-then-cancel-then-market-sell fallback loop as `commitBuy`. Unlike `commitBuy`, `commitSell` does not guard against open orders or check the coin balance before placing the order — it assumes the caller has already confirmed that the coin is available to sell.
+
+<Warning>
+`commitSell` places real orders on Binance spot using live API credentials. There is no dry-run or simulation mode. Every call that reaches the exchange will attempt to sell coin from the account.
+</Warning>
+
+## Signature
+
+```typescript
+commitSell(symbol: string, amountUSDT: number): Promise<number>
+```
+
+## Parameters
+
+<ParamField path="symbol" type="string" required>
+  Binance trading pair symbol, e.g. `"SOLUSDT"`. Must be a valid spot pair recognized by the exchange.
+</ParamField>
+
+<ParamField path="amountUSDT" type="number" required>
+  The USDT-denominated value of coin to sell. The function converts this to a coin quantity using `amountUSDT / averagePrice` before placing the order. Must be a positive finite number — `WalletPublicService` throws before any network call if the value is `NaN`, non-numeric, or negative.
+</ParamField>
+
+## Returns
+
+<ResponseField name="fillPrice" type="number">
+  The average fill price of the sell order in USDT. Derived from the `fills` array on the Binance order response (or from the limit price when `fills` is absent). Because there is no balance guard, this method always attempts to place an order and will always return a non-zero fill price on success.
+</ResponseField>
+
+## Execution flow
+
+1. `WalletPublicService` fetches the current average price via `fetchPrice` and validates `amountUSDT`.
+2. The call is routed through the per-symbol `EventListener` queue so it cannot run concurrently with other operations on the same symbol.
+3. `COMMIT_SELL_FN` computes coin quantity as `usdToCoins(amountUSDT, averagePrice)`, rounds it to `LOT_SIZE` `stepSize`, and rounds the order price to `PRICE_FILTER` `tickSize`.
+4. A LIMIT SELL is placed at `averagePrice × 0.999` — just below market to improve fill speed.
+5. If the response status is already `FILLED`, the average fill price is returned immediately.
+6. Otherwise, `orderStatus` is polled every 10 seconds for up to 10 iterations (≈ 100 seconds).
+7. If the order fills during polling, the fill price is returned.
+8. **On timeout**: the resting order is cancelled. The unfilled remainder (`quantity − executedQty`) is submitted as a market sell. The average fill price of the market order is returned.
+
+## Difference from `commitBuy`
+
+`commitSell` does not check for open orders and does not verify the coin balance before acting. It is the caller's responsibility to ensure sufficient coin is available. This mirrors the design intent: `commitBuy` guards against double-entry, while `commitSell` is used to exit a position that is known to exist.
+
+## Example
+
+```typescript
+const fillPrice = await wallet.walletPublicService.commitSell("SOLUSDT", 20);
+console.log(`Sold SOLUSDT at average price: ${fillPrice}`);
+// e.g. 77.51
+```

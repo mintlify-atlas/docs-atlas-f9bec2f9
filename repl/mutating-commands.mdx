@@ -1,0 +1,178 @@
+---
+title: "Mutating REPL Commands: Buy, Sell, Trade, and Cancel"
+sidebarTitle: "Mutating Commands"
+description: "Execute guarded buy, sell, trade-with-brackets, and full-flatten commands from the REPL. Every call places real orders on Binance spot."
+---
+
+The mutating commands give you full order-management capability from the REPL: enter a position, exit a partial slice, set up OCO bracket protection, or flatten an entire symbol to cash in one call. All operations run through `walletPublicService`, which serializes them per symbol, validates inputs, and emits an audit log record after every call.
+
+<Warning>
+**These commands place real orders on Binance spot using live API keys. There is no dry-run mode.** Every `commit*` call below will interact with your actual account balance. Double-check the symbol and amount before pressing Enter.
+</Warning>
+
+---
+
+## `commitBuy(symbol, amountUSDT)`
+
+A guarded market entry. Before placing any order the function checks two safety conditions and returns `0` immediately — without touching the exchange — if either is violated:
+
+- The symbol already has one or more open orders (a resting TP, SL, or stale limit is still live).
+- The account's free USDT balance is below `amountUSDT`.
+
+If both guards pass, it places a **LIMIT BUY** at `avgPrice × 1.001` (slightly above mid to encourage a fast fill), then polls the order status every 10 seconds, up to 10 times (~100 seconds total). If the order is still open after all polls, it is **cancelled** and the unfilled remainder is **market-bought** — the entry never stays resting on the book after this call returns.
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|---|---|---|
+| `symbol` | `string` | Trading pair, e.g. `"SOLUSDT"` |
+| `amountUSDT` | `number` | Notional size of the buy in USDT |
+
+**Returns:** `Promise<number>` — average fill price, or `0` if the guards blocked the trade.
+
+```
+repl => await wallet.walletPublicService.commitBuy("SOLUSDT", 20)
+77.83
+```
+
+A return value of `0` means the position was not opened. Check open orders with `fetchOrders` or verify your free USDT balance with `fetchFiat`.
+
+---
+
+## `commitSell(symbol, amountUSDT)`
+
+Sells `amountUSDT` worth of the coin corresponding to `symbol`. Converts the USDT notional to a coin quantity at the current average price, then places a **LIMIT SELL** at `avgPrice × 0.999` (slightly below mid). The same poll loop as `commitBuy` runs: check every 10 seconds up to 10 times, and on timeout the order is **cancelled** and the unfilled remainder is **market-sold**.
+
+Unlike `commitBuy`, `commitSell` does not check for open orders or minimum balance before proceeding — it will attempt the sell immediately.
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|---|---|---|
+| `symbol` | `string` | Trading pair, e.g. `"SOLUSDT"` |
+| `amountUSDT` | `number` | Notional size of the sell in USDT |
+
+**Returns:** `Promise<number>` — average fill price.
+
+```
+repl => await wallet.walletPublicService.commitSell("SOLUSDT", 20)
+77.41
+```
+
+---
+
+## `commitTrade(symbol, amountUSDT, takeProfitPrice, stopLossPrice)`
+
+A complete entry-plus-brackets flow in a single call. It validates the price relationship, executes a buy via the `commitBuy` flow, then immediately places an **OCO sell** (take-profit limit + stop-loss limit) to protect the position.
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|---|---|---|
+| `symbol` | `string` | Trading pair, e.g. `"SOLUSDT"` |
+| `amountUSDT` | `number` | Notional size in USDT |
+| `takeProfitPrice` | `number` | Price at which the take-profit leg of the OCO triggers |
+| `stopLossPrice` | `number` | Price at which the stop-loss leg of the OCO triggers |
+
+**Returns:** `Promise<{ status: "ok"; content: string } | 0>` — a trade summary string on success, or `0` if the same guards as `commitBuy` blocked the entry (open orders already present, or insufficient USDT balance).
+
+**Validation — throws before touching the exchange if any rule is violated:**
+
+<Steps>
+  <Step title="Take-profit above current price">
+    `takeProfitPrice` must be strictly greater than the current average price. Passing a take-profit at or below market throws `"take-profit price must be greater than average price"`.
+  </Step>
+  <Step title="Stop-loss below current price">
+    `stopLossPrice` must be strictly less than the current average price. Passing a stop-loss at or above market throws `"stop-loss price must be less than average price"`.
+  </Step>
+  <Step title="Stop-loss below take-profit">
+    `stopLossPrice` must be less than `takeProfitPrice`. Inverted brackets throw `"stop-loss price is greater than take-profit price"`.
+  </Step>
+  <Step title="Both prices positive">
+    Both `takeProfitPrice` and `stopLossPrice` must be greater than zero and be finite numbers.
+  </Step>
+</Steps>
+
+The OCO order uses the filled coin quantity (post-buy balance minus pre-buy balance, less the maker fee and minimum lot size) as the sell quantity — not the notional `amountUSDT`. This means the entire bought position is protected.
+
+```
+repl => await wallet.walletPublicService.commitTrade("SOLUSDT", 20, 85.0, 74.0)
+{
+  "status": "ok",
+  "content": "..."
+}
+```
+
+The `content` string is a human-readable trade summary that includes the buy price, OCO quantities, and take-profit / stop-loss prices in USDT terms.
+
+---
+
+## `commitCancel(symbol)`
+
+**Flatten the symbol to cash.** This is the most destructive command: it cancels every open order on the symbol and sells the entire free coin balance to USDT. It mirrors the `onOrderCloseCommit` logic used in the reference broker adapter — and for the same reason: you must cancel open orders before selling, because resting orders lock the base coin and a sell placed on top of a lock would either fail or only trade the unlocked remainder.
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|---|---|---|
+| `symbol` | `string` | Trading pair to fully flatten, e.g. `"SOLUSDT"` |
+
+**Returns:** `Promise<number>` — average sell price, or `0` if the free coin balance is below `minQty` (dust left untouched).
+
+```
+repl => await wallet.walletPublicService.commitCancel("SOLUSDT")
+77.30
+```
+
+The function executes three sequential steps:
+
+<Steps>
+  <Step title="Cancel all open orders">
+    Fetches all open orders for the symbol and cancels them one by one, with a 1-second pause between each cancel. Individual cancel failures are tolerated — the sweep retries up to 10 rounds. The loop exits as soon as a full sweep completes with no errors, or when the open order list is empty.
+  </Step>
+  <Step title="Verify the book is clean">
+    Polls `binance.openOrders(symbol)` up to 10 times with a 1-second interval. Throws if any open order remains after all attempts — this is a hard guard to ensure the subsequent sell is operating on unlocked funds.
+  </Step>
+  <Step title="Sell the entire free balance">
+    Fetches the current free coin quantity, subtracts the maker fee percentage and the exchange `minQty`, and places a **LIMIT SELL** at `avgPrice × 0.999`. The same poll + cancel + market-sell fallback from `commitBuy`/`commitSell` applies. If the final quantity after fee deduction is at or below `minQty`, the function returns `0` without placing any order (dust).
+  </Step>
+</Steps>
+
+For a detailed walkthrough of why cancel-then-verify-then-sell is the correct sequence for closing a spot position, see the [Cancel, Verify, Sell](/order-management/cancel-verify-sell) reference.
+
+---
+
+## `commitReload(symbol)`
+
+Clears the TTL caches for `fetchOrders` and `fetchPnl` for the given symbol. No exchange call is made. Use this when you want the next read to fetch fresh data without waiting for the 10-minute TTL to expire naturally, and without executing a trade (every `commit*` trade call already clears the cache automatically).
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|---|---|---|
+| `symbol` | `string` | Symbol whose order and PnL caches to invalidate |
+
+**Returns:** `Promise<void>`
+
+```
+repl => await wallet.walletPublicService.commitReload("SOLUSDT")
+repl => await wallet.walletPublicService.fetchOrders("SOLUSDT", 25)
+// Returns freshly fetched data
+```
+
+To flush caches for all symbols simultaneously, call the raw layer directly:
+
+```javascript
+repl => wallet.walletPrivateService.clear()
+```
+
+---
+
+<Tip>
+**Dump any result to disk.** The `fs` global is Node's built-in `fs` module. Save the output of any command to a JSON file for later review:
+
+```javascript
+const result = await wallet.walletPublicService.fetchOrders("SOLUSDT", 25)
+fs.writeFileSync("result.json", JSON.stringify(result, null, 2))
+```
+</Tip>

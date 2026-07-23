@@ -1,0 +1,45 @@
+---
+title: "fetchFiat: Total USDT Balance (Free and Locked)"
+sidebarTitle: "fetchFiat"
+description: "fetchFiat returns the total USDT balance on the Binance account, including amounts locked in open orders."
+---
+
+`fetchFiat` returns the total USDT balance on the Binance account, summing both the free amount and any USDT currently locked in open buy orders. This gives a true picture of total capital in the account regardless of how much is tied up in pending orders. The value is account-wide — it is not scoped to any particular trading pair.
+
+## Signature
+
+```typescript
+fetchFiat(symbol: string): Promise<number>
+```
+
+## Parameters
+
+<ParamField path="symbol" type="string" required>
+  A Binance trading pair symbol, e.g. `"SOLUSDT"`. This argument is accepted for interface consistency with the other `fetch*` methods but is not used — USDT balance is account-wide and does not depend on the symbol. The value is routed through the per-symbol execution queue, so any valid symbol string is acceptable.
+</ParamField>
+
+## Returns
+
+<ResponseField name="usdtBalance" type="number">
+  Total USDT balance on the Binance account: `usdtBalance.free + usdtBalance.locked`. Returns `0` if no USDT asset entry is found on the account (e.g. a fresh account with no USDT ever deposited).
+</ResponseField>
+
+## Implementation
+
+`fetchFiat` calls `binance.account()` to retrieve the full account balances array, finds the entry with `asset === "USDT"`, and returns `parseFloat(usdtBalance.free) + parseFloat(usdtBalance.locked)`.
+
+The `locked` portion represents USDT committed to open BUY orders that have not yet been filled or cancelled. Including it in the returned value ensures callers can reason about total capital rather than only immediately spendable funds.
+
+## Example
+
+```typescript
+const usdt = await wallet.walletPublicService.fetchFiat("SOLUSDT");
+console.log(usdt);
+// 150.32
+
+// Check whether the account has enough to place a buy:
+const amountToBuy = 20;
+if (usdt < amountToBuy) {
+  console.log("Insufficient USDT balance");
+}
+```

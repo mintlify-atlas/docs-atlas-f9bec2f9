@@ -1,0 +1,105 @@
+---
+title: "Poll-with-Timeout and Market Fallback for Limit Orders"
+sidebarTitle: "Poll & Fallback"
+description: "How commitBuy and commitSell poll limit orders every 10 seconds and fall back to a market order after timeout, ensuring the order never stays resting on the book."
+---
+
+A limit order that misses the market should never be left alive on the exchange. Resting orders are invisible to the engine: if a forgotten limit fills hours later at a price the engine no longer controls, it creates a real position that no engine state tracks. Wallet Manager prevents this by coupling every limit order to a bounded poll loop and a mandatory fallback: after a fixed waiting window, the limit is cancelled and any unfilled remainder is immediately market-ordered. The entry or exit is guaranteed to complete — one way or another — within the polling window.
+
+## The Poll Loop
+
+After placing a limit order, `commitBuy` and `commitSell` enter a loop that checks order status every 10 seconds for up to 10 iterations — a maximum wait of **100 seconds**:
+
+```typescript
+let isNotClosed = true;
+let lastStatus: Order = null;
+for (let i = 0; i !== 10; i++) {
+  await sleep(10_000);
+  lastStatus = await binance.orderStatus(symbol, orderId);
+  if (lastStatus.status === "FILLED") {
+    isNotClosed = false;
+    break;
+  }
+}
+```
+
+`isNotClosed` starts as `true` and is only flipped to `false` on a confirmed `"FILLED"` status. If the loop exhausts all 10 iterations without seeing a fill, `isNotClosed` remains `true` and the timeout path fires.
+
+<Note>
+  The loop checks for `"FILLED"` only. A `"PARTIALLY_FILLED"` status does not
+  break the loop early — the function continues waiting, giving the limit order
+  more time to complete its fill before the timeout triggers.
+</Note>
+
+## Timeout Handling
+
+When `isNotClosed` is still `true` after the poll loop, three things happen in sequence:
+
+1. **Cancel the limit order** — remove it from the book so it cannot fill later.
+2. **Compute the unfilled remainder** — subtract `executedQty` (the amount already filled) from the original `quantity`.
+3. **Market-order the remainder** — guarantee the full position is entered or exited at current market price.
+
+```typescript
+if (isNotClosed) {
+  await binance.cancel(symbol, orderId);
+  const orderQty = await formatQuantity(
+    symbol,
+    Number(quantity) - Number(lastStatus?.executedQty || 0),
+    binance
+  );
+  lastStatus = await binance.marketBuy(symbol, Number(orderQty));
+  return getAveragePrice(lastStatus, Number(orderPrice));
+}
+```
+
+`commitSell` uses `binance.marketSell` in the same position; the structure is identical. The final return value is the average fill price computed across all fills reported by the market order response (with `orderPrice` as a fallback if the fills array is empty).
+
+## Price Offsets
+
+Neither `commitBuy` nor `commitSell` posts a limit order exactly at the current market price. Each applies a small offset to improve fill probability:
+
+| Function | Limit price | Direction | Rationale |
+|---|---|---|---|
+| `commitBuy` | `averagePrice × 1.001` | Slightly **above** market | A buy above the current ask is likely to match immediately |
+| `commitSell` | `averagePrice × 0.999` | Slightly **below** market | A sell below the current bid is likely to match immediately |
+
+The 0.1 % offset is narrow enough that the price impact is negligible on liquid spot pairs, but wide enough to win the queue position and avoid sitting behind resting orders at exactly the mid-price.
+
+## Partial Fills
+
+When a limit order partially fills before the 100-second timeout, only the **remaining** quantity is market-ordered:
+
+```typescript
+Number(quantity) - Number(lastStatus?.executedQty || 0)
+```
+
+The resulting `lastStatus` from the market order carries its own `fills` array. `getAveragePrice` averages the prices across those fills using the `orderPrice` as a fallback when fills is empty:
+
+```typescript
+const getAveragePrice = (order: Order, fallbackPrice: number) => {
+  const fallback = { price: fallbackPrice };
+  const { fills = [fallback] } = order;
+  const price = fills.reduce((acm, { price }) => acm + Number(price), 0);
+  return price / fills.length;
+};
+```
+
+This means the return value of `commitBuy` or `commitSell` is the average price of the **market** fills only — not a blended average across both the partial limit fill and the market fill. The caller (the broker adapter engine) uses this price to record the entry or exit cost.
+
+## Where This Pattern Applies
+
+The poll-with-timeout + market fallback is used in three places:
+
+- **`commitBuy`** — entry limit buy, market-buy fallback on timeout
+- **`commitSell`** — partial exit limit sell, market-sell fallback on timeout
+- **`commitCancel` (sell leg)** — after the cancel-verify phase, the exit sell uses the same loop and falls back to `binance.marketSell` on timeout
+
+In the broker adapter example (`onOrderOpenCommit`), a structurally identical loop is also used directly, with the added dimension of Rule 1: any timeout on open causes the partial fill to be rolled back with a market sell before the transient throw.
+
+<Tip>
+  To force the market fallback path during local testing, place a limit buy at
+  roughly 50 % of the current market price — it will not fill within 100 s and
+  the fallback will trigger automatically. Watch for the `binance.cancel` call
+  followed immediately by `binance.marketBuy` in your exchange log or
+  `console.log` output to confirm the path fired.
+</Tip>

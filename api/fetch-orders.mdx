@@ -1,0 +1,76 @@
+---
+title: "fetchOrders: Recent Order History for a Symbol"
+sidebarTitle: "fetchOrders"
+description: "fetchOrders returns recent filled, canceled, and open orders for a symbol as IOrderData[]. Results are cached for 10 minutes."
+---
+
+`fetchOrders` returns a unified view of recent order activity for a symbol, combining historical trade data (filled and cancelled orders) with the current open order book. Each result is enriched with the full order status from `binance.orderStatus()`, giving accurate `status`, `executedQty`, and `origQty` fields even for partially-filled entries. The result list always places pending orders first so the current state of the book is immediately visible at the top.
+
+## Signature
+
+```typescript
+fetchOrders(symbol: string, limit?: number): Promise<IOrderData[]>
+```
+
+## Parameters
+
+<ParamField path="symbol" type="string" required>
+  Binance trading pair symbol, e.g. `"SOLUSDT"`.
+</ParamField>
+
+<ParamField path="limit" type="number">
+  Maximum number of historical (filled/cancelled) orders to return. Defaults to `25`. Open orders are always prepended regardless of this limit.
+</ParamField>
+
+## Returns
+
+<ResponseField name="orders" type="IOrderData[]">
+  An array of order records. Pending (`NEW`) orders appear first, sorted by time descending. Historical orders follow, also sorted by time descending. Each record conforms to the `IOrderData` interface:
+
+  ```typescript
+  interface IOrderData {
+    symbol: string;
+    orderId: number;
+    status: "FILLED" | "CANCELED" | "NEW";
+    amount: string;        // origQty — the originally requested quantity
+    executedQty: string;   // actually filled quantity
+    price: string;
+    time: string;          // ISO 8601
+    side: "BUY" | "SELL";
+  }
+  ```
+</ResponseField>
+
+## Result ordering
+
+1. **Pending orders** (`NEW` status) from `binance.openOrders(symbol)` — sorted by time descending, prepended to the array.
+2. **Historical orders** from `binance.trades()` — deduplicated by `orderId`, enriched with `binance.orderStatus()`, sorted by time descending.
+
+## Caching
+
+Results are cached for 10 minutes (`ORDERS_TTL = 10 * 60 * 1_000`) keyed by `symbol-limit` inside `WalletPrivateService`. The cache is automatically busted after every `commit*` call via `walletPrivateService.clear()`. To manually invalidate the cache without placing an order, call `commitReload(symbol)`.
+
+## Implementation detail
+
+`FETCH_ORDERS_FN` uses `binance.trades()` to fetch recent trade history, iterating in paginated batches via `iterateDocuments` and deduplicating entries by `orderId` using a `Set`. Each unique order ID is then resolved to its full status via `binance.orderStatus()` using a concurrency-controlled execution pool (`execpool`). The current open orders are fetched separately via `binance.openOrders(symbol)` and prepended to the result.
+
+## Example
+
+```typescript
+const orders = await wallet.walletPublicService.fetchOrders("SOLUSDT", 10);
+console.log(orders[0]);
+// {
+//   symbol: "SOLUSDT",
+//   orderId: 4820193847,
+//   status: "FILLED",
+//   amount: "0.25000000",
+//   executedQty: "0.25000000",
+//   price: "77.83000000",
+//   time: "2025-01-15T14:32:01.000Z",
+//   side: "BUY"
+// }
+
+// Save to file for inspection:
+import fs from "fs";
+fs.writeFileSync("orders.json", JSON.stringify(orders, null, 2));
+```

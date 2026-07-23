@@ -1,0 +1,105 @@
+---
+title: "Dry-Fire a Broker Adapter Hook Against the Live Exchange"
+sidebarTitle: "Testing"
+description: "Use the backtest-kit CLI brokerdebug flag to fire onOrderOpenCommit or onOrderCloseCommit against the live adapter before waiting for a real signal."
+---
+
+Testing a broker adapter in production normally requires waiting for a real trading signal to arrive — which can take hours and leaves little time to observe what went wrong when the first live order fails. The `--brokerdebug` flag on the backtest-kit CLI solves this by letting you fire any single hook against the live adapter immediately, with a synthetic payload, against the real exchange. You can verify the full order lifecycle — placement, polling, cancellation, market fallback, and retry reconcile — before your strategy ever emits a signal.
+
+<Warning>
+  `--brokerdebug` fires against the **live exchange with real money**. Verify the symbol, your account's available balance, and your full intent before running. There is no dry-run mode.
+</Warning>
+
+## CLI Dry-Fire Command
+
+```bash
+npx @backtest-kit/cli --brokerdebug --commit signal-open --symbol SOLUSDT
+```
+
+Each flag:
+
+| Flag | Effect |
+|---|---|
+| `--brokerdebug` | Enables broker hook dry-firing mode — bypasses the normal signal pipeline and calls the adapter hook directly |
+| `--commit signal-open` | Selects `onOrderOpenCommit` as the hook to fire |
+| `--symbol SOLUSDT` | The trading pair passed in the synthetic payload — the hook uses this to look up exchange info, place the order, and poll fills |
+
+## What to Verify in `onOrderOpenCommit`
+
+Run the dry-fire once per scenario and observe the adapter's behaviour end-to-end:
+
+<Steps>
+  <Step title="Backtest mode guard">
+    Confirm the guard fires correctly in backtest mode. When the engine is in backtest mode `payload.backtest` is `true` and the function must return immediately without placing any order. No Binance API call should be made.
+  </Step>
+
+  <Step title="clientOrderId reconcile on retry">
+    The reconcile block runs when `attempt > 0`. To test it: fire the hook, interrupt it before the fill poll completes, then fire it again. On the second call `attempt` arrives as `1` and the adapter queries `origClientOrderId = signalId`. Verify three sub-cases:
+    - The prior order is `FILLED` → the hook returns without re-sending.
+    - The prior order is `NEW` or `PARTIALLY_FILLED` → the hook cancels the stale order before placing the new one.
+    - No order found (prior request never reached the exchange) → the hook proceeds directly to placement.
+  </Step>
+
+  <Step title="Limit order placement and fill polling">
+    With a normal run, watch the adapter place the LIMIT BUY and enter the 10 × 10-second poll loop. Verify the `clientOrderId` on the placed order matches `signalId` — this is the idempotency anchor used by the reconcile step on the next attempt. Confirm a fill returns without error.
+  </Step>
+
+  <Step title="Market fallback on timeout">
+    To trigger the timeout path without waiting 100 seconds: place the limit price far off-market so the order won't fill, then let the poll loop exhaust. Verify that after 10 failed status checks the adapter cancels the order and calls `marketSell` on any `executedQty`. The exchange is returned to a clean cash state before the transient `Error` is thrown.
+  </Step>
+
+  <Step title="OrderRejectedError on the fifth attempt">
+    Set `attempt = 4` (or run the dry-fire five consecutive times for the same `signalId`). On the fifth attempt the adapter must throw `OrderRejectedError`, not a plain `Error`. Verify the engine's signal id is consumed into `lastPendingId` and the signal is not re-issued.
+  </Step>
+</Steps>
+
+## What to Verify in `onOrderCloseCommit`
+
+To dry-fire the close hook, change `--commit signal-open` to `--commit signal-close`:
+
+```bash
+npx @backtest-kit/cli --brokerdebug --commit signal-close --symbol SOLUSDT
+```
+
+<Steps>
+  <Step title="Cancel sweep before selling">
+    Open one or more orders on the symbol manually first (from the REPL or Binance UI), then fire the close hook. Verify all orders are cancelled before any sell is attempted. Trying to sell while orders hold funds frozen in the order lock causes an insufficient-balance error on Binance — the cancel-first order is mandatory.
+  </Step>
+
+  <Step title="Verify loop catches remaining orders">
+    Confirm that after the cancel sweep the verification loop polls `openOrders` and only proceeds to the sell when the result is empty. If orders somehow persist (e.g. a cancel raced with a fill), the verification loop should throw a transient error and allow the engine to retry.
+  </Step>
+
+  <Step title="Entire free balance is sold">
+    After cancellation, verify the sell order quantity is computed from `account.balances[coinName].free` — the full free balance — not from the engine's tracked position size. Any coin sitting in the account from previous untracked trades or manual REPL buys should be included in the sell. Confirm the `makerFee` reserve and `minQty` buffer are both deducted before the order is placed.
+  </Step>
+
+  <Step title="Market-sell fallback on slow limit">
+    Place the limit sell price far above market so it won't fill, wait for the poll loop to exhaust, and verify the adapter cancels the resting sell and issues a `marketSell` for the remaining unfilled quantity. The position must not be left as an open coin balance after the hook returns.
+  </Step>
+</Steps>
+
+## Manual REPL Testing
+
+Before wiring the adapter to the full engine, individual order-management flows can also be exercised directly from the Wallet Manager REPL. Start the REPL with `npm start`, then:
+
+```
+repl => await wallet.walletPublicService.commitBuy("SOLUSDT", 20)
+```
+
+Places a limit BUY for 20 USDT of SOLUSDT, polls for a fill, and falls back to a market buy on timeout. This exercises the same post-poll-cancel-fallback flow that `onOrderOpenCommit` is built from.
+
+```
+repl => await wallet.walletPublicService.commitCancel("SOLUSDT")
+```
+
+Cancels all open orders on SOLUSDT, verifies the book is empty, and sells the entire free SOLUSDT balance to USDT. This is the exact flow used by `onOrderCloseCommit`.
+
+<Tip>
+  Use the REPL's `fetchOrders` and `fetchBalance` commands before and after each test to confirm the exchange state matches what you expect:
+
+  ```
+  repl => await wallet.walletPublicService.fetchOrders("SOLUSDT", 10)
+  repl => await wallet.walletPublicService.fetchBalance("SOLUSDT")
+  ```
+</Tip>

@@ -1,0 +1,65 @@
+---
+title: "Order Management Concepts: Three Rules for Safe Spot Trading"
+sidebarTitle: "Concepts"
+description: "Wallet Manager encodes three order-management patterns — cancel-verify-sell, poll-timeout-fallback, and clientOrderId reconcile — that prevent frozen balances and duplicate fills."
+---
+
+Building a reliable broker adapter for a spot exchange is harder than it looks. The exchange is a stateful system: every unfilled order leaves real funds locked on the book, and a retry after a network failure may arrive after the previous attempt already touched the exchange. Get either of those wrong and you end up with frozen balances that block new orders, duplicate fills that open a second position the engine never asked for, or resting TP/SL brackets that keep holding the base coin long after the trade is meant to be closed. Wallet Manager codifies three concrete patterns that eliminate each failure mode.
+
+## The Three Patterns
+
+Every `commit_*` function in Wallet Manager is built from one or more of these patterns. Knowing which function uses which pattern tells you exactly what guarantees you get.
+
+**Cancel-verify-sell** — before placing any exit order, cancel every open order on the symbol and confirm the book is empty. On spot, a resting SELL locks the base coin and a resting BUY locks USDT; attempting to sell into a locked balance either fails with `insufficient balance` or silently fills only the unlocked fraction. The cancel-verify phase releases all locks so the subsequent SELL has access to the full free balance.
+
+→ See [Cancel-Verify-Sell](/order-management/cancel-verify-sell) for the full sequence.
+
+**Poll-with-timeout + market fallback** — after placing a limit order, poll its status every 10 seconds for up to 10 rounds (≈100 s total). If the limit has not filled by the deadline, cancel it and immediately market-order any unfilled remainder. A limit order must never be left resting on the exchange unattended: it can fill later on its own at a price the engine no longer controls, creating a position the engine knows nothing about.
+
+→ See [Poll & Fallback](/order-management/poll-timeout-fallback) for the poll loop and fallback mechanics.
+
+**clientOrderId reconciliation** — on every retry (`attempt > 0`), query the exchange by the original `clientOrderId` (= `signalId`) before placing a new order. If the previous attempt already filled, return immediately without re-sending. If it is still open, cancel it first. This prevents a lost network response from becoming a double entry.
+
+→ See [ID Reconcile](/order-management/clientorderid-reconcile) for the reconcile check and its three outcomes.
+
+## Why These Matter on Spot
+
+Spot margin rules make order-state hygiene especially unforgiving:
+
+- **Resting SELL orders lock the base coin.** A 0.5 SOL sell order means 0.5 SOL is unavailable to any other order until that sell is filled or cancelled. Sending a second sell without cancelling the first can fail with `Account has insufficient balance for requested action` or, worse, silently execute for only the remaining free quantity.
+- **Resting BUY orders lock USDT.** An unfilled limit buy holds the USDT cost in the order reserve. A retry that posts a second buy doubles the locked USDT, potentially exhausting the free balance.
+- **TP/SL orders hold funds after a position closes.** After `commitCancel` exits the position to cash, any OCO bracket left alive on the symbol still holds the coin that was supposed to be sold. The cancel sweep inside `commitCancel` (and `onOrderCloseCommit`) clears these before the exit sell, ensuring the full balance is available.
+- **Silent partial fills on retry.** If only half the balance is free when the second order lands, Binance may fill that half at the requested quantity and silently reject the rest — or reduce the fill size without error. The result is a position that is smaller than the engine expects, with no exception raised.
+
+Together the three patterns form a defensive boundary: no order is left resting, no retry fires without checking what the last attempt did, and every exit starts with a provably clean book.
+
+## Pattern Pages
+
+<CardGroup cols={2}>
+  <Card
+    title="Cancel-Verify-Sell"
+    icon="ban"
+    href="/order-management/cancel-verify-sell"
+  >
+    Cancel all open orders, verify the book is empty, then sell the entire free
+    balance — the canonical safe-exit sequence used by `commitCancel` and
+    `onOrderCloseCommit`.
+  </Card>
+  <Card
+    title="Poll & Fallback"
+    icon="clock"
+    href="/order-management/poll-timeout-fallback"
+  >
+    Poll a limit order every 10 s for up to 100 s. On timeout, cancel and
+    market-order the remainder — used by `commitBuy`, `commitSell`, and the sell
+    leg of `commitCancel`.
+  </Card>
+  <Card
+    title="ID Reconcile"
+    icon="fingerprint"
+    href="/order-management/clientorderid-reconcile"
+  >
+    On retry, look up the previous order by `clientOrderId` before re-sending —
+    prevents double entries when a filled order's response was lost in transit.
+  </Card>
+</CardGroup>

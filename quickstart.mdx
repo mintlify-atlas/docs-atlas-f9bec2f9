@@ -1,47 +1,134 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with Wallet Manager in 5 Minutes"
+sidebarTitle: "Quickstart"
+description: "Install dependencies, configure Binance API credentials, build the bundle, and execute your first wallet inspection and trade from the interactive REPL."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
-
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
-
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+Wallet Manager ships with an interactive REPL that evaluates raw JavaScript against a live Binance spot account — no server to start, no REST client to configure. The steps below take you from a fresh clone to your first balance check and price fetch in under five minutes.
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
+
+  <Step title="Prerequisites">
+    Before you begin, make sure you have the following:
+
+    - **Node.js 18 or later** — the REPL relies on `readline` and native ESM.
+    - **A Binance account** with a Spot API key and secret. To create one, go to **API Management** in your Binance account settings and generate a new key.
+
+    <Note>
+      When creating the API key, enable **Spot & Margin Trading** permission. Read-only keys can run the `fetch*` commands but will fail on any `commit*` call. IP restriction is strongly recommended for production keys.
+    </Note>
+  </Step>
+
+  <Step title="Clone and install">
+    Clone the repository and install dependencies:
 
     ```bash
-    npm install your-package
+    git clone https://github.com/backtest-kit/wallet-manager
+    cd wallet-manager
+    npm install
     ```
+
+    The project uses Rollup to bundle `src/index.ts` into `build/index.mjs`. The `npm start` script runs the build automatically before launching the REPL, so no separate build step is needed.
   </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+
+  <Step title="Configure credentials">
+    Create a `.env` file in the project root with your Binance API credentials:
 
     ```bash
-    your-cli init
+    CC_BINANCE_API_KEY=your_api_key_here
+    CC_BINANCE_API_SECRET=your_api_secret_here
     ```
+
+    `npm start` loads this file via `dotenv` before the REPL process starts. The variable names `CC_BINANCE_API_KEY` and `CC_BINANCE_API_SECRET` are read directly by `WalletPrivateService` when it initializes the `node-binance-api` client.
+
+    <Warning>
+      `.env` contains live credentials that authorize real orders on your
+      Binance account. Never commit this file to version control. Add `.env` to
+      your `.gitignore` if it is not already there.
+    </Warning>
   </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+
+  <Step title="Start the REPL">
+    Launch the REPL with:
 
     ```bash
-    your-cli start
+    npm start
     ```
+
+    This runs `npm run build` (Rollup) first, then starts the interactive prompt:
+
+    ```
+    repl =>
+    ```
+
+    The prompt accepts raw JavaScript expressions. `await` is supported at the top level — no `async` wrapper needed. Objects are pretty-printed as JSON; primitives are printed as-is. Type `exit` to quit.
   </Step>
+
+  <Step title="First commands">
+    Try these read-only commands to confirm your credentials work and inspect your account:
+
+    ```
+    repl => await wallet.walletPublicService.fetchPrice("SOLUSDT")
+    77.56
+
+    repl => await wallet.walletPublicService.fetchFiat("SOLUSDT")
+    150.32
+
+    repl => await wallet.walletPublicService.fetchBalance("SOLUSDT")
+    {
+      "quantity": 0,
+      "usdt": 0
+    }
+
+    repl => await wallet.walletPublicService.fetchOrders("SOLUSDT", 5)
+    [...]
+
+    repl => exit
+    ```
+
+    | Command | What it returns |
+    |---|---|
+    | `fetchPrice("SOLUSDT")` | Current market price as a number |
+    | `fetchFiat("SOLUSDT")` | Your free USDT balance |
+    | `fetchBalance("SOLUSDT")` | `{ quantity, usdt }` — coin holdings and USDT value |
+    | `fetchOrders("SOLUSDT", N)` | Last N orders (FILLED / CANCELED / NEW) with side, price, and timestamps |
+
+    <Note>
+      If the REPL prints a credentials error on the first `await`, double-check
+      that the `.env` file is in the project root (the same directory as
+      `package.json`) and that both variable names are spelled correctly.
+    </Note>
+  </Step>
+
+  <Step title="Two globals available">
+    The REPL injects two globals into every expression you type:
+
+    **`wallet`** — the service container, identical to the exported `wallet` object from `src/index.ts`. It has two properties:
+
+    - `wallet.walletPublicService` — the recommended interface. Validates arguments, serializes calls per symbol via an execution queue, and emits a structured audit log record after every `commit*` call. Use this for all order placement and inspection.
+    - `wallet.walletPrivateService` — the raw layer underneath. No validation, no queueing. Useful for inspecting TTL cache state or calling `clear()` to flush cached order and PnL data. Not recommended for order placement.
+
+    **`fs`** — Node's built-in `fs` module, injected so you can dump results to disk without importing anything:
+
+    ```
+    repl => const orders = await wallet.walletPublicService.fetchOrders("SOLUSDT", 50)
+    repl => fs.writeFileSync("orders.json", JSON.stringify(orders, null, 2))
+    ```
+
+    This is handy for capturing large order histories or PnL arrays for offline analysis.
+  </Step>
+
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+## Next Steps
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
-</Tip>
+<CardGroup cols={2}>
+  <Card title="REPL Guide" icon="terminal" href="/repl/overview">
+    Explore all read and mutating commands — `commitBuy`, `commitSell`,
+    `commitTrade`, `commitCancel` — with full examples and expected outputs.
+  </Card>
+  <Card title="Order Management" icon="arrow-right-arrow-left" href="/order-management/concepts">
+    Understand the cancel-verify-sell pattern, poll-with-timeout loop, and
+    market fallback so you can build a correct broker adapter from scratch.
+  </Card>
+</CardGroup>

@@ -1,0 +1,43 @@
+---
+title: "fetchPrice: Current Average Market Price for a Symbol"
+sidebarTitle: "fetchPrice"
+description: "fetchPrice returns the current average price for a Binance trading pair, rounded to the exchange's tick size. Cached for 30 seconds."
+---
+
+`fetchPrice` returns the current average market price for a Binance spot trading pair. The price is fetched from Binance's average-price endpoint, rounded to the exchange's `PRICE_FILTER` tick size for the symbol, and returned as a plain JavaScript number. The result is cached for 30 seconds inside `WalletPrivateService`, so repeated calls within that window do not generate additional API requests.
+
+## Signature
+
+```typescript
+fetchPrice(symbol: string): Promise<number>
+```
+
+## Parameters
+
+<ParamField path="symbol" type="string" required>
+  Binance trading pair symbol, e.g. `"SOLUSDT"`. Must be a valid spot symbol recognized by the exchange.
+</ParamField>
+
+## Returns
+
+<ResponseField name="price" type="number">
+  The current average price of the symbol in USDT, rounded down to the exchange's `PRICE_FILTER` `tickSize`. For example, if SOLUSDT has a tick size of `0.01`, a raw price of `77.5631` is returned as `77.56`.
+</ResponseField>
+
+## Caching
+
+`WalletPrivateService` wraps the Binance price fetch in a 30-second TTL cache (controlled by `PRICE_UPDATE_MS = 30_000`). All `commit*` methods in `WalletPublicService` call `fetchPrice` internally to obtain the `averagePrice` argument passed down to the private service — they all benefit from this cache.
+
+After any `commit*` call, `WalletPublicService` calls `walletPrivateService.clear()`, which resets the orders and PnL caches but not the price cache. The price cache expires on its own TTL.
+
+## Implementation note
+
+`fetchPrice` calls `binance.avgPrice(symbol)` — Binance's weighted average price over the trailing 5-minute window — rather than the last-trade price. This provides a more stable value that is less susceptible to single-trade spikes and is appropriate for calculating limit order placement offsets.
+
+## Example
+
+```typescript
+const price = await wallet.walletPublicService.fetchPrice("SOLUSDT");
+console.log(price);
+// 77.56
+```

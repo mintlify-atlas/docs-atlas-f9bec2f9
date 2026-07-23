@@ -1,0 +1,137 @@
+---
+title: "WalletPublicService: Validated Binance Spot API Facade"
+sidebarTitle: "WalletPublicService"
+description: "WalletPublicService wraps WalletPrivateService with input validation, per-symbol execution queuing, and structured audit logs after every commit."
+---
+
+`WalletPublicService` is the recommended entry point for all wallet operations. It wraps the lower-level `WalletPrivateService` with three layers of safety that the raw service deliberately omits: argument validation that throws descriptive errors before any network call is made, a per-symbol serialized execution queue that prevents concurrent orders on the same pair from racing each other, and a structured `console.log` audit record emitted after every `commit*` operation regardless of success or failure.
+
+You should reach for `WalletPublicService` in all normal usage. `WalletPrivateService` exists as a debugging surface and should not be called directly in production code.
+
+## Accessing the service
+
+```typescript
+import wallet from 'wallet-manager';
+// or from the REPL:
+// wallet.walletPublicService is available globally
+const service = wallet.walletPublicService;
+```
+
+## Key behaviors
+
+### Per-symbol execution queue
+
+Every method call is routed through an internal `EventListener` instance that is memoized per symbol using `functools-kit`'s `queued()` wrapper. All operations on the same symbol are serialized — a second `commitBuy("SOLUSDT", …)` called while the first is still polling Binance will wait in the queue rather than running concurrently. Operations on different symbols run independently.
+
+### Input validation
+
+Before delegating to `WalletPrivateService`, `WalletPublicService` validates caller-supplied arguments and throws descriptive `Error` instances:
+
+- `amountUSDT` must be a finite number (`typeof amountUSDT !== "number" || isNaN(amountUSDT)`) and must not be negative.
+- For `commitTrade`, all three price arguments are checked for finiteness, `takeProfitPrice` must be strictly above the current market price, `stopLossPrice` must be strictly below it, and `stopLossPrice` must be less than `takeProfitPrice`.
+
+### Structured audit log on every commit
+
+After every `commit*` call — in the `finally` block, so it fires on both success and failure — the service emits a structured log entry:
+
+```typescript
+{
+  symbol: string;
+  action: "buy" | "sell" | "trade" | "cancel";
+  amountUSDT: number;
+  averagePrice: number;
+  date: Date;
+  status: "success" | "failed";
+}
+```
+
+### TTL cache invalidation
+
+`WalletPrivateService` caches `fetchOrders` and `fetchPnl` for 10 minutes. After every `commit*` call, `WalletPublicService` calls `walletPrivateService.clear()` to bust both caches so the next read reflects the new state of the account.
+
+---
+
+## Method summary
+
+| Method | Signature | Returns |
+|---|---|---|
+| `commitBuy` | `(symbol, amountUSDT)` | `Promise<number>` |
+| `commitSell` | `(symbol, amountUSDT)` | `Promise<number>` |
+| `commitTrade` | `(symbol, amountUSDT, takeProfitPrice, stopLossPrice)` | `Promise<0 \| { status: string, content: string }>` |
+| `commitCancel` | `(symbol)` | `Promise<number>` |
+| `commitReload` | `(symbol)` | `Promise<void>` |
+| `fetchPrice` | `(symbol)` | `Promise<number>` |
+| `fetchBalance` | `(symbol)` | `Promise<{ usdt: number, quantity: number }>` |
+| `fetchFiat` | `(symbol)` | `Promise<number>` |
+| `fetchOrders` | `(symbol, limit?)` | `Promise<IOrderData[]>` |
+| `fetchPnl` | `(symbol, limit?)` | `Promise<IDailyPnL[]>` |
+
+---
+
+## Type definitions
+
+### IOrderData
+
+Returned by `fetchOrders`. Each entry represents a single order from Binance trade history or the open order book.
+
+```typescript
+interface IOrderData {
+  symbol: string;
+  orderId: number;
+  status: "FILLED" | "CANCELED" | "NEW";
+  amount: string;        // origQty — the originally requested quantity
+  executedQty: string;   // actually filled quantity
+  price: string;
+  time: string;          // ISO 8601
+  side: "BUY" | "SELL";
+}
+```
+
+### IDailyPnL
+
+Returned by `fetchPnl`. Each entry aggregates realized PnL and balance state for one calendar day.
+
+```typescript
+interface IDailyPnL {
+  date: string;          // ISO 8601 day
+  pnl: string;           // realized PnL for the day (USDT)
+  walletCost: string;    // average cost basis of traded quantity
+  amountQty: string;     // cumulative coin balance at end of day
+  amountUSDT: string;    // amountQty × VWAP for the day
+  averagePrice: string;  // VWAP from 1h candles
+}
+```
+
+---
+
+## Method pages
+
+<CardGroup cols={2}>
+  <Card title="commitBuy" icon="arrow-up" href="/api/commit-buy">
+    Guarded limit buy with market fallback on timeout
+  </Card>
+  <Card title="commitSell" icon="arrow-down" href="/api/commit-sell">
+    Limit sell with poll loop and market fallback
+  </Card>
+  <Card title="commitTrade" icon="chart-candlestick" href="/api/commit-trade">
+    Buy with OCO take-profit and stop-loss brackets
+  </Card>
+  <Card title="commitCancel" icon="xmark" href="/api/commit-cancel">
+    Flatten symbol and exit entire balance to USDT
+  </Card>
+  <Card title="fetchPrice" icon="dollar-sign" href="/api/fetch-price">
+    Current average market price for a symbol
+  </Card>
+  <Card title="fetchBalance" icon="wallet" href="/api/fetch-balance">
+    Coin balance including locked amounts
+  </Card>
+  <Card title="fetchFiat" icon="coins" href="/api/fetch-fiat">
+    Total USDT balance (free and locked)
+  </Card>
+  <Card title="fetchOrders" icon="list" href="/api/fetch-orders">
+    Recent order history for a symbol
+  </Card>
+  <Card title="fetchPnl" icon="chart-line" href="/api/fetch-pnl">
+    Daily PnL estimate from trade history
+  </Card>
+</CardGroup>

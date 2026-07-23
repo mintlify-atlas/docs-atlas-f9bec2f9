@@ -1,0 +1,65 @@
+---
+title: "commitBuy: Guarded Limit Buy with Market Fallback"
+sidebarTitle: "commitBuy"
+description: "commitBuy places a limit BUY at price × 1.001, polls every 10 s, and falls back to a market buy after timeout. Returns 0 if open orders exist or balance is insufficient."
+---
+
+`commitBuy` is the standard entry point for opening a long position on a Binance spot symbol. It first checks that the symbol has no resting orders and that free USDT covers the requested amount — returning `0` without touching the exchange if either guard fails. When the guards pass it places a LIMIT BUY slightly above the current average price, polls for a fill every 10 seconds for up to 100 seconds, and if the limit does not fill in that window it cancels the resting order and market-buys the unfilled remainder so the entry never stays open on the book indefinitely.
+
+<Warning>
+`commitBuy` places real orders on Binance spot using live API credentials. There is no dry-run or simulation mode. Every non-zero return value means funds have been committed to the exchange.
+</Warning>
+
+## Signature
+
+```typescript
+commitBuy(symbol: string, amountUSDT: number): Promise<number>
+```
+
+## Parameters
+
+<ParamField path="symbol" type="string" required>
+  Binance trading pair symbol, e.g. `"SOLUSDT"`. Must be a valid spot pair on Binance; the exchange will reject unknown symbols.
+</ParamField>
+
+<ParamField path="amountUSDT" type="number" required>
+  The amount in USDT to spend on this buy. Must be a positive finite number — `WalletPublicService` throws before any network call if `amountUSDT` is `NaN`, non-numeric, or negative.
+</ParamField>
+
+## Returns
+
+<ResponseField name="fillPrice" type="number">
+  The average fill price of the executed order in USDT. Returns `0` if no trade was placed (open orders exist or balance is insufficient). When the order is filled — whether by the limit order itself or by the market-buy fallback — the return value is derived from the `fills` array on the Binance order response, falling back to the posted limit price when `fills` is empty.
+</ResponseField>
+
+## Guards
+
+`commitBuy` returns `0` without placing any order when either of the following conditions is true:
+
+- **Open orders exist**: `binance.openOrders(symbol)` returns a non-empty array. This prevents buying on top of a position that already has a pending entry, take-profit, or stop-loss order.
+- **Insufficient balance**: the free USDT balance on the account (from `binance.account()`) is less than `amountUSDT`. This prevents a partial-fill entry that would leave the USDT position undersized.
+
+## Execution flow
+
+1. `WalletPublicService` fetches the current average price via `fetchPrice` and validates `amountUSDT`.
+2. The call is enqueued on the per-symbol `EventListener` queue, ensuring no concurrent order logic runs on the same symbol.
+3. `COMMIT_BUY_FN` checks open orders and free balance (the guards above).
+4. The USDT amount is converted to coin quantity and both quantity and price are rounded to the exchange's `LOT_SIZE` `stepSize` and `PRICE_FILTER` `tickSize`.
+5. A LIMIT BUY is placed at `averagePrice × 1.001` — slightly above the current market to improve the chance of an immediate fill while still capturing a near-market price.
+6. If the order status is already `FILLED` in the placement response, the average fill price is returned immediately.
+7. Otherwise, `orderStatus` is polled every 10 seconds for up to 10 iterations (≈ 100 seconds total).
+8. If the order fills during polling, the fill price is returned.
+9. **On timeout**: the resting limit order is cancelled. The unfilled remainder (`quantity − executedQty`) is submitted as a market buy. The average fill price of the market order is returned.
+
+## Example
+
+```typescript
+const fillPrice = await wallet.walletPublicService.commitBuy("SOLUSDT", 20);
+
+if (fillPrice === 0) {
+  console.log("No trade placed — open orders exist or balance insufficient");
+} else {
+  console.log(`Bought SOLUSDT at average price: ${fillPrice}`);
+  // e.g. 77.83
+}
+```

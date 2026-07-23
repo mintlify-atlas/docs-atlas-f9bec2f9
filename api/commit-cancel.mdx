@@ -1,0 +1,67 @@
+---
+title: "commitCancel: Flatten Symbol and Exit Entire Balance to USDT"
+sidebarTitle: "commitCancel"
+description: "commitCancel cancels all open orders on a symbol, verifies the book is clean, then sells the entire free coin balance to USDT."
+---
+
+`commitCancel` is the definitive "flatten and exit to cash" operation. It is designed around a critical constraint of Binance spot: a resting order (take-profit, stop-loss, or a stale limit entry) locks the base coin or USDT it would need to fill. Attempting to sell over locked funds either fails with an insufficient balance error or silently trades only the unlocked remainder. The correct sequence is always: cancel every pending order, verify the book is empty, and only then sell the full coin balance. `commitCancel` enforces this sequence unconditionally.
+
+<Warning>
+`commitCancel` places real orders on Binance spot. It will cancel **all** open orders on the specified symbol — including take-profit and stop-loss brackets — and sell the **entire** free coin balance to USDT. There is no partial flatten mode. Ensure this is the intended action before calling it.
+</Warning>
+
+## Signature
+
+```typescript
+commitCancel(symbol: string): Promise<number>
+```
+
+## Parameters
+
+<ParamField path="symbol" type="string" required>
+  Binance trading pair symbol to flatten, e.g. `"SOLUSDT"`. All open orders on this symbol will be cancelled and all free coin balance will be sold.
+</ParamField>
+
+## Returns
+
+<ResponseField name="exitPrice" type="number">
+  The average fill price of the sell order in USDT. Returns `0` if the free coin quantity after fee and `minQty` deductions is at or below `minQty` (dust) — in that case no sell order is placed and the tiny remainder is left on the account.
+</ResponseField>
+
+## Execution flow
+
+<Steps>
+  <Step title="Cancel all open orders">
+    `binance.openOrders(symbol)` is fetched and every order in the response is cancelled via `binance.cancel(symbol, orderId)` with a 1-second pause between each cancellation. Individual cancel failures are tolerated — the entire sweep repeats up to 10 times until every order is gone or an unrecoverable error is thrown. If any cancellation error persists after all retries, it is rethrown so the caller can handle it.
+  </Step>
+  <Step title="Verify book is clean">
+    After the cancellation sweep, `binance.openOrders(symbol)` is polled again — up to 10 times with a 1-second interval — until it returns an empty array. This confirms that the exchange has processed all cancellations and that no funds remain locked. If open orders are still present after all retries, an `Error("Order not canceled")` is thrown.
+  </Step>
+  <Step title="Sell entire free balance">
+    The current coin balance is fetched via `FETCH_BALANCE_FN`. The sellable quantity is:
+    ```
+    quantity = balance.quantity
+             - makerFeePercent(balance.quantity)
+             - minQty
+    ```
+    If `quantity <= minQty` the function returns `0` (dust, not worth selling). Otherwise a LIMIT SELL is placed at `currentPrice × 0.999`. If the limit does not fill within 10 polls of 10 seconds each, it is cancelled and the remainder is submitted as a market sell.
+  </Step>
+</Steps>
+
+## Fee accounting
+
+Before placing the sell order, `commitCancel` subtracts the `makerCommission` percentage (read from `binance.account()`) and one `minQty` unit from the raw balance quantity. This ensures the order quantity is within the exchange's accepted range and that fees do not cause a post-trade negative balance.
+
+## Example
+
+```typescript
+const exitPrice = await wallet.walletPublicService.commitCancel("SOLUSDT");
+
+if (exitPrice === 0) {
+  console.log("No sell placed — coin balance is below minQty (dust)");
+} else {
+  console.log(`Exited SOLUSDT at average price: ${exitPrice}`);
+}
+```
+
+For the conceptual explanation of why cancel-verify-sell must be a single atomic sequence, see [Order Management: Cancel, Verify, Sell](/order-management/cancel-verify-sell).

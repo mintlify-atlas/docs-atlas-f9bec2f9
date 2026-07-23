@@ -1,0 +1,127 @@
+---
+title: "WalletPrivateService: Raw Binance Layer with TTL Caching"
+sidebarTitle: "WalletPrivateService"
+description: "WalletPrivateService is the raw Binance API layer with TTL-cached orders and PnL. Use for debugging — prefer WalletPublicService for normal operations."
+---
+
+`WalletPrivateService` is the thin layer that sits directly on top of `node-binance-api`. It handles Binance client initialization, delegates every operation to its corresponding `src/function/` handler, and applies TTL caching to the two expensive read methods (`fetchOrders` and `fetchPnl`). Unlike `WalletPublicService`, it has no per-symbol execution queue, no argument validation, and requires the caller to supply `averagePrice` explicitly rather than fetching it internally. Use this service only when debugging internal state, inspecting TTL cache behaviour, or making raw API calls from the REPL — for every normal operation use `wallet.walletPublicService` instead.
+
+## Accessing the service
+
+`WalletPrivateService` is exposed on the `wallet` global that is injected into the REPL at startup:
+
+```typescript
+// Available globally in the REPL:
+wallet.walletPrivateService
+```
+
+## Binance client initialization
+
+The Binance client is created by `getBinance()`, a `singleshot`-wrapped async factory from `functools-kit`. On the first call it constructs a `node-binance-api` instance configured with your API credentials, calls `useServerTime()` to align the local clock with Binance's server, and stores the resulting instance on `globalThis.binance$` so it is accessible directly from the REPL. Subsequent calls return the already-resolved promise — the factory only runs once per process. If either credential variable is empty the factory throws immediately with a descriptive error and clears its singleshot lock so the next call retries from scratch once the environment is fixed.
+
+```typescript
+const binance$ = new Binance().options({
+  family: 4,
+  APIKEY: CC_BINANCE_API_KEY,
+  APISECRET: CC_BINANCE_API_SECRET,
+  useServerTime: true,
+  recvWindow: 60000,
+});
+```
+
+After construction, `getBinance()` calls `binance$.useServerTime()` to perform the clock sync before returning the instance.
+
+## TTL cache constants
+
+`WalletPrivateService` defines four timing constants that control cache lifetime and background garbage collection:
+
+| Constant | Value | Purpose |
+|---|---|---|
+| `WALLET_GC_TTL` | `30_000` ms (30 s) | GC interval — expired cache entries are swept on this cadence |
+| `ORDERS_TTL` | `600_000` ms (10 min) | TTL applied to each `fetchOrders(symbol, limit)` result |
+| `PNL_TTL` | `600_000` ms (10 min) | TTL applied to each `fetchPnl(symbol, limit)` result |
+| `AVERAGE_PRICE_TTL` | `300_000` ms (5 min) | Price TTL used internally by `fetchPrice` |
+
+The GC timer is started lazily on the first use of the service via the `singleshot`-wrapped `init` method. It calls `.gc()` on the `fetchPnl` and `fetchOrders` TTL stores every `WALLET_GC_TTL` milliseconds to evict stale entries and free memory.
+
+## Method signatures
+
+All public methods are typed in `types.d.ts`. `fetchOrders` and `fetchPnl` carry the additional `IClearableTtl` and `IControlMemoize` interfaces from `functools-kit` that expose the `.clear()` and `.gc()` controls used by the service internally.
+
+```typescript
+commitTrade(symbol, amountUSDT, averagePrice, takeProfitPrice, stopLossPrice): Promise<0 | { status: string; content: string }>
+commitCancel(symbol, averagePrice): Promise<number>
+commitBuy(symbol, amountUSDT, averagePrice): Promise<number>
+commitSell(symbol, amountUSDT, averagePrice): Promise<number>
+fetchBalance(): Promise<Record<string, { usdt: number; quantity: number }>>
+fetchPrice(symbol): Promise<number>
+fetchFiat(): Promise<number>
+fetchOrders(symbol, limit): Promise<IOrderData[]>  // TTL-cached
+fetchPnl(symbol, limit): Promise<IDailyPnL[]>      // TTL-cached
+clear(): void  // busts orders + PnL cache
+```
+
+### `IOrderData`
+
+Each element returned by `fetchOrders` has the following shape:
+
+```typescript
+interface IOrderData {
+  symbol: string;
+  orderId: number;
+  status: "FILLED" | "CANCELED" | "NEW";
+  amount: string;
+  executedQty: string;
+  price: string;
+  time: string;
+  side: "BUY" | "SELL";
+}
+```
+
+### `IDailyPnL`
+
+Each element returned by `fetchPnl` has the following shape:
+
+```typescript
+interface IDailyPnL {
+  date: string;
+  pnl: string;
+  walletCost: string;
+  amountQty: string;
+  amountUSDT: string;
+  averagePrice: string;
+}
+```
+
+## Key difference from WalletPublicService
+
+`WalletPublicService` wraps every symbol's operations in a per-symbol serialised execution queue (preventing concurrent mutating calls on the same symbol), validates inputs before forwarding them, and fetches the current average price internally so callers do not have to supply it. `WalletPrivateService` does none of that:
+
+- **`averagePrice` is a required explicit argument** on `commitTrade`, `commitCancel`, `commitBuy`, and `commitSell`. The private service never fetches it on your behalf.
+- **No input validation** — bad arguments are forwarded directly to the Binance API.
+- **No execution queue** — concurrent calls on the same symbol are not serialised.
+
+This makes the private service useful for inspecting exactly what the underlying functions do, but unsuitable as the primary interface for production use.
+
+## `clear()` method
+
+`clear()` immediately invalidates the TTL cache for both `fetchOrders` and `fetchPnl` across all symbols and limits. `WalletPublicService` calls this automatically after every successful `commit*` operation so the next read always reflects the latest state from Binance. You can also call it manually after any out-of-band trade:
+
+```typescript
+wallet.walletPrivateService.clear();
+```
+
+## `binance$` global
+
+After `getBinance()` runs for the first time, the raw `node-binance-api` instance is stored on `globalThis.binance$`. This makes it available by name in the REPL without going through the service layer — useful for making arbitrary API calls that the service methods do not expose:
+
+```
+repl => await binance$.openOrders("SOLUSDT")
+repl => await binance$.account()
+```
+
+The `binance$` global is only populated after the first call that triggers `getBinance()` — typically the first `commit*` or `fetch*` call in a REPL session.
+
+<Note>
+  Prefer `wallet.walletPublicService` for all normal operations. It adds per-symbol queueing, input validation, and automatic cache invalidation after every commit. Use the private service only when debugging internal state or making raw Binance API calls that the public service does not expose.
+</Note>

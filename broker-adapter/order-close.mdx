@@ -1,0 +1,232 @@
+---
+title: "onOrderCloseCommit: Flatten Symbol and Exit to Cash"
+sidebarTitle: "Order Close"
+description: "Full walkthrough of onOrderCloseCommit: cancel all open orders, verify clean book, sell entire free coin balance — sweeping orphan tranches too."
+---
+
+`onOrderCloseCommit` is the adapter hook called when the engine wants to close an open position. Its job is to flatten the symbol completely: cancel every live order regardless of type, verify the order book is empty, and sell the entire free coin balance to USDT. The sequence is strict by design — trying to sell while orders are still holding funds frozen in the exchange's order lock will either fail with an insufficient-balance error or silently trade only the unlocked remainder, leaving part of the position open. The reference implementation follows the cancel-verify-sell pattern from `commitCancel` and extends it with the same limit-sell-then-market-fallback exit used on open.
+
+## Full Implementation
+
+```typescript
+override async onOrderCloseCommit(payload: BrokerOrderClosePayload) {
+  if (payload.backtest) return; // never touch the exchange in backtest mode
+  const { symbol, currentPrice } = payload;
+  const binance = await getBinance();
+  const coinName = getCoinName(symbol);
+
+  // Step 1: cancel every open order on the symbol (up to CANCEL_ROUNDS sweeps,
+  // individual cancel failures are tolerated — the sweep repeats)
+  {
+    let error;
+    for (let i = 0; i !== CANCEL_ROUNDS; i++) {
+      let isOk = true;
+      const orders = await binance.openOrders(symbol);
+      for (const order of orders) {
+        try {
+          await sleep(1_000);
+          await binance.cancel(symbol, order.orderId);
+          error = null;
+        } catch (e) {
+          isOk = false;
+          error = e;
+          continue;
+        }
+      }
+      if (!orders.length) {
+        error = null;
+        break;
+      }
+      if (isOk) {
+        break;
+      }
+    }
+    if (error) {
+      throw error; // transient — the engine retries the close on the next tick
+    }
+  }
+
+  // Step 2: verify not a single live order is left on the symbol
+  {
+    let error;
+    for (let i = 0; i !== CANCEL_ROUNDS; i++) {
+      try {
+        await sleep(1_000);
+        const { length: hasOrders } = await binance.openOrders(symbol);
+        if (hasOrders) {
+          error = new Error("Order not canceled");
+        } else {
+          error = null;
+          break;
+        }
+      } catch (e) {
+        error = e;
+      }
+    }
+    if (error) {
+      throw error;
+    }
+  }
+
+  // Step 3: exit to cash — sell the ENTIRE free coin balance
+  const account = await binance.account();
+  const coinBalance = account.balances.find(({ asset }) => asset === coinName);
+  if (!coinBalance) {
+    throw new Error(`Can't fetch balance (close) for ${coinName}`);
+  }
+  const freeQty = parseFloat(coinBalance.free);
+
+  const { minQty } = await getExchangeInfo(symbol, "LOT_SIZE", binance);
+  if (!minQty) {
+    throw new Error(`Can't fetch minimal quantity (close) for ${coinName}`);
+  }
+  const maker = account.makerCommission / 100;
+
+  const quantity = freeQty - percentValue(freeQty, maker) - Number(minQty);
+  if (quantity <= Number(minQty)) {
+    return; // dust — nothing to sell, confirm the close
+  }
+
+  const sellQty = await formatQuantity(symbol, quantity, binance);
+  const sellPrice = await formatPrice(
+    symbol,
+    currentPrice * TRADE_SELL_LOWER_PERCENT,
+    binance
+  );
+
+  const order = await binance.order("LIMIT", "SELL", symbol, Number(sellQty), Number(sellPrice));
+  if (order.status === "FILLED") {
+    return; // cashed out — the engine records the close
+  }
+
+  // Same wait loop (await + sleep) as on open
+  let last = order;
+  for (let i = 0; i !== FILL_POLL_ATTEMPTS; i++) {
+    await sleep(FILL_POLL_INTERVAL_MS);
+    last = await binance.orderStatus(symbol, order.orderId);
+    if (last.status === "FILLED") {
+      return;
+    }
+  }
+
+  // The limit order did not fill — cancel it and finish the remainder with a
+  // market sell: the cash exit is guaranteed, the position never stays hanging
+  await binance.cancel(symbol, order.orderId);
+  const restQty = await formatQuantity(
+    symbol,
+    Number(sellQty) - Number(last?.executedQty ?? 0),
+    binance
+  );
+  await binance.marketSell(symbol, Number(restQty));
+}
+```
+
+## Walkthrough
+
+<Steps>
+  <Step title="Backtest mode guard">
+    ```typescript
+    if (payload.backtest) return;
+    ```
+    Same guard as `onOrderOpenCommit`. In backtest mode the engine's state accounting handles position tracking; the hook must not touch the exchange. Returning without throwing signals a successful close to the engine.
+  </Step>
+
+  <Step title="Payload fields">
+    ```typescript
+    const { symbol, currentPrice } = payload;
+    ```
+
+    | Field | Purpose |
+    |---|---|
+    | `symbol` | Binance trading pair to flatten, e.g. `"SOLUSDT"` |
+    | `currentPrice` | Reference price used to compute the limit sell price (`currentPrice × 0.999`) |
+
+    Unlike `onOrderOpenCommit`, the close hook does not use `signalId` or `attempt` for reconcile logic — any throw from the close hook is treated as transient and the engine retries automatically.
+  </Step>
+
+  <Step title="Step 1 — Cancel loop">
+    ```typescript
+    for (let i = 0; i !== CANCEL_ROUNDS; i++) {
+      let isOk = true;
+      const orders = await binance.openOrders(symbol);
+      for (const order of orders) {
+        try {
+          await sleep(1_000);
+          await binance.cancel(symbol, order.orderId);
+          error = null;
+        } catch (e) {
+          isOk = false;
+          error = e;
+          continue;
+        }
+      }
+      if (!orders.length) { error = null; break; }
+      if (isOk) { break; }
+    }
+    ```
+    The outer loop runs up to `CANCEL_ROUNDS` (10) sweeps over the symbol's open orders. A 1-second sleep between individual cancels avoids rate-limit bursts. Individual cancel failures are tolerated — `isOk` is marked false and the outer loop sweeps again on the next iteration. The loop exits early when there are no orders left, or when an entire sweep completes without any error. If the error variable is still set after all rounds, it is rethrown as a transient error and the engine retries the close.
+
+    This tolerant multi-sweep design handles scenarios where an order is partially cancellable, a cancel races with an exchange-side fill, or a transient network error blocks one of the cancels.
+  </Step>
+
+  <Step title="Step 2 — Verify loop">
+    ```typescript
+    for (let i = 0; i !== CANCEL_ROUNDS; i++) {
+      await sleep(1_000);
+      const { length: hasOrders } = await binance.openOrders(symbol);
+      if (hasOrders) {
+        error = new Error("Order not canceled");
+      } else {
+        error = null;
+        break;
+      }
+    }
+    ```
+    A separate verification pass polls `openOrders` up to 10 times to confirm the book is truly empty before the sell is placed. This guards against edge cases where a cancel appears to succeed but the order lingers briefly in the exchange's state. If orders remain after all verification rounds, the function throws — the engine retries the entire close sequence on the next tick.
+  </Step>
+
+  <Step title="Step 3 — Sell entire free balance">
+    ```typescript
+    const freeQty = parseFloat(coinBalance.free);
+    const maker = account.makerCommission / 100;
+    const quantity = freeQty - percentValue(freeQty, maker) - Number(minQty);
+
+    const sellQty = await formatQuantity(symbol, quantity, binance);
+    const sellPrice = await formatPrice(symbol, currentPrice * TRADE_SELL_LOWER_PERCENT, binance);
+
+    const order = await binance.order("LIMIT", "SELL", symbol, Number(sellQty), Number(sellPrice));
+    ```
+    The sellable quantity is computed as `freeQty − makerFeeReserve − minQty`. Subtracting the maker fee reserve ensures the sale proceeds are not short by the fee amount. Subtracting `minQty` provides a buffer so the order passes Binance's minimum notional validation. The limit price is set at `currentPrice × 0.999` — 0.1% below market — so the order crosses the book quickly without immediately falling back to a market order.
+  </Step>
+
+  <Step title="Fill poll and market-sell fallback">
+    ```typescript
+    for (let i = 0; i !== FILL_POLL_ATTEMPTS; i++) {
+      await sleep(FILL_POLL_INTERVAL_MS);
+      last = await binance.orderStatus(symbol, order.orderId);
+      if (last.status === "FILLED") { return; }
+    }
+
+    await binance.cancel(symbol, order.orderId);
+    const restQty = await formatQuantity(
+      symbol,
+      Number(sellQty) - Number(last?.executedQty ?? 0),
+      binance
+    );
+    await binance.marketSell(symbol, Number(restQty));
+    ```
+    The same 10 × 10-second poll loop from `onOrderOpenCommit` is reused here. If the limit sell does not fill within ~100 seconds the order is cancelled and the remaining unfilled quantity (`sellQty − executedQty`) is sold with an unconditional market order. The cash exit is guaranteed — the position never stays hanging as a partially-open coin balance.
+  </Step>
+</Steps>
+
+## Orphan Sweep
+
+Because Step 3 sells the **entire** free coin balance — not just the quantity the engine tracked for this position — `onOrderCloseCommit` automatically sweeps any tranches bought outside the engine. This is intentional: if a manual REPL trade or a previous failed-cleanup left coin sitting in the account, the close hook will include it in the exit sell. The engine never under-exits because of an untracked balance.
+
+## Transient Behavior
+
+Any throw from `onOrderCloseCommit` is transient. The engine keeps the position marked as open and retries the close on the next tick with `attempt + 1`. After exhausting `CC_ORDER_CLOSE_RETRY_ATTEMPTS` the engine force-closes its own state — the durable teardown always happens before the fatal exit (behaviour introduced in backtest-kit 16.5.x).
+
+<Warning>
+  If `quantity <= minQty` after deducting the maker fee and the minimum lot buffer, the function returns without selling. This is intentional — a dust balance below `minQty` cannot form a valid Binance order. The engine records the close as confirmed. Any remaining dust stays in the account.
+</Warning>

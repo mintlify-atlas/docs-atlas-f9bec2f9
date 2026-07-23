@@ -1,0 +1,90 @@
+---
+title: "Interactive REPL for Live Binance Spot Operations"
+sidebarTitle: "Overview"
+description: "The Wallet Manager REPL evaluates raw JavaScript with await support, pretty-prints results as JSON, and provides two globals: wallet and fs."
+---
+
+The Wallet Manager REPL is a lightweight interactive shell that gives you direct, programmatic access to a live Binance spot account. It is the fastest way to inspect balances, examine order history, place entries, and flatten positions by hand — without involving the trading engine at all. Use it when you need to reconcile a symbol manually, debug a broker adapter flow against a real account, or run one-off trades outside of any automated strategy.
+
+## Starting the REPL
+
+Run the single `npm start` command from the `wallet-manager` directory. It builds the Rollup bundle first, loads `.env` via `dotenv`, and then launches the REPL process:
+
+```bash
+npm start
+```
+
+Before running, ensure your `.env` file is present with valid Binance credentials:
+
+```bash
+CC_BINANCE_API_KEY=your_api_key_here
+CC_BINANCE_API_SECRET=your_api_secret_here
+```
+
+## Prompt Behavior
+
+The prompt evaluates raw JavaScript. `await` is fully supported at the top level — every expression is implicitly awaited. Object and array results are pretty-printed as indented JSON. Scalar results (numbers, strings) are printed as-is. Type `exit` to terminate the session cleanly.
+
+```
+repl => await wallet.walletPublicService.fetchPrice("SOLUSDT")
+77.56
+repl => await wallet.walletPublicService.fetchBalance("SOLUSDT")
+{
+  "quantity": 2.5,
+  "usdt": 193.90
+}
+repl => exit
+```
+
+If an expression throws, the error is printed and the prompt returns — the REPL does not exit.
+
+## Two Globals
+
+Two objects are injected into the global scope at startup.
+
+**`wallet`** — the service container. It exposes two layers:
+
+| Global | Purpose | When to use |
+|---|---|---|
+| `wallet.walletPublicService` | Per-symbol execution queue, input validation, structured audit log after every `commit*` call | **Default — use this one** |
+| `wallet.walletPrivateService` | Raw layer with no validation, no queue, and no audit log | Debugging and introspection only |
+
+**`fs`** — Node's built-in `fs` module. Useful for saving results to disk between sessions:
+
+```javascript
+fs.writeFileSync("out.json", JSON.stringify(result, null, 2))
+```
+
+## Audit Log
+
+Every `commit*` call routed through `walletPublicService` emits a structured `console.log` record immediately after the operation completes, regardless of whether it succeeded or failed. The record has a fixed shape:
+
+```json
+{
+  "symbol": "SOLUSDT",
+  "action": "buy",
+  "amountUSDT": 20,
+  "averagePrice": 77.56,
+  "date": "2025-01-15T10:32:00.000Z",
+  "status": "success"
+}
+```
+
+The `action` field is one of `"buy"`, `"sell"`, `"trade"`, or `"cancel"`. The `status` field is `"success"` when the call returned normally and `"failed"` when it threw. The `walletPrivateService.clear()` cache flush is always called in the `finally` block after every commit, so subsequent reads reflect the post-trade state.
+
+## Per-Symbol Queue
+
+`walletPublicService` serializes all operations on the same symbol through a `queued()` execution queue. Each symbol gets its own independent queue instance, memoized by symbol string. If you fire two concurrent `commit*` calls on `"SOLUSDT"`, the second call waits for the first to finish before it executes — they are never parallelized. Calls on different symbols run concurrently.
+
+This prevents the classic broker-adapter race condition where a sell order is placed while a pending buy still holds USDT in lock, or where two partial sells compete against the same coin balance.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Read Commands" icon="magnifying-glass" href="/repl/read-commands">
+    Inspect live prices, balances, order history, and PnL without placing any orders.
+  </Card>
+  <Card title="Mutating Commands" icon="bolt" href="/repl/mutating-commands">
+    Execute guarded buys, sells, OCO bracket trades, and full-flatten cancels.
+  </Card>
+</CardGroup>
